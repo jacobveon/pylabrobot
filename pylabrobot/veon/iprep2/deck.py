@@ -160,19 +160,58 @@ class IPrep2Deck(Deck):
     """
     return {zone: holder.resource for zone, holder in self._zone_holders.items()}
 
+  def _check_fits(self, resource: Resource, zone: str) -> None:
+    """Refuse labware that does not fit the zone it is being put in.
+
+    This deck holds an SBS footprint on its long edge, and PyLabRobot's plate definitions are
+    drawn on their short edge, so the usual plate is a quarter turn from the orientation this deck
+    takes. Turning it is the caller's to do rather than this method's: rotating labware moves
+    every well in it, and doing that silently is how a protocol comes to aspirate from the wrong
+    one. Refusing says what happened at the point the mistake was made.
+
+    Args:
+      resource: the labware.
+      zone: the zone it is going in.
+
+    Raises:
+      ValueError: If it does not fit as it stands.
+    """
+    width, depth = resource.get_absolute_size_x(), resource.get_absolute_size_y()
+    if width <= ZONE_SIZE_X and depth <= ZONE_SIZE_Y:
+      return
+
+    complaint = (
+      f"{resource.name} is {width:.2f} x {depth:.2f} mm and {zone} takes "
+      f"{ZONE_SIZE_X} x {ZONE_SIZE_Y} mm"
+    )
+    if depth <= ZONE_SIZE_X and width <= ZONE_SIZE_Y:
+      raise ValueError(
+        f"{complaint}. This deck holds labware on its long edge, so it needs a quarter turn: "
+        f"assign_child_at_zone(resource.rotated(z=90), {zone!r}). Rotating it here instead would "
+        f"move every well without saying so."
+      )
+    raise ValueError(f"{complaint}, and turning it would not help.")
+
   def assign_child_at_zone(self, resource: Resource, zone: str) -> None:
     """Put labware in a zone.
+
+    The labware has to fit the zone as it stands. This deck takes an SBS footprint on its long
+    edge, which is a quarter turn from how PyLabRobot draws a plate, so the usual plate goes in as
+    `resource.rotated(z=90)` - and the zone holder works out where the turned labware sits, so its
+    wells land where the instrument expects them.
 
     Args:
       resource: the labware.
       zone: which zone, named as the instrument names it.
 
     Raises:
-      ValueError: If there is no such zone, or something is already in it.
+      ValueError: If there is no such zone, something is already in it, or the labware does not
+        fit it in the orientation given.
     """
     holder = self._zone_holders.get(zone)
     if holder is None:
       raise ValueError(f"no zone {zone!r} on this deck; it has {', '.join(self.zone_names)}")
+    self._check_fits(resource, zone)
     if holder.resource is not None:
       raise ValueError(f"{zone} already holds {holder.resource.name}")
     holder.assign_child_resource(resource)
