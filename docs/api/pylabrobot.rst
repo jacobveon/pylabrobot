@@ -41,3 +41,4 @@ Manufacturers
     pylabrobot.revvity
     pylabrobot.sartorius
     pylabrobot.thermo_fisher
+    pylabrobot.veon

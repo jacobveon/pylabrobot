@@ -2074,5 +2074,22 @@
     "code_slug": "li_cor/odyssey",
     "doc_slug": "li_cor/odyssey/hello-world",
     "notes": "HTTP scan control and TIFF retrieval; port pending hardware verification."
+  },
+  {
+    "id": "veon-iprep2",
+    "vendor": "Veon Scientific",
+    "name": "i.prep 2",
+    "kind": "liquid handler",
+    "capabilities": [
+      "liquid handling"
+    ],
+    "status": "wip",
+    "api": "pylabrobot.veon.IPrep2",
+    "api_version": "v1",
+    "code_slug": "veon/iprep2",
+    "doc_slug": "veon/iprep2/hello-world",
+    "manager": "https://discuss.pylabrobot.org/u/jacobbaker",
+    "oem": "https://veonscientific.com",
+    "notes": "Discovery, the resource model and the instrument's event stream; motion and liquid handling are not implemented yet."
   }
 ]
