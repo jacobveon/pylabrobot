@@ -86,6 +86,57 @@ class DeckGeometryTests(unittest.TestCase):
     self.assertIn("Zone1", str(caught.exception))
 
 
+class FitTests(unittest.TestCase):
+  """Labware has to fit the zone in the orientation it is given in."""
+
+  def setUp(self) -> None:
+    self.deck = IPrep2Deck()
+
+  def test_labware_that_fits_goes_in(self) -> None:
+    """The deck takes an SBS footprint on its long edge, which is what `labware` is."""
+    self.deck.assign_child_at_zone(labware(), "Zone1")
+    self.assertIsNotNone(self.deck.zones["Zone1"])
+
+  def test_a_plate_the_usual_way_round_is_refused(self) -> None:
+    """PyLabRobot draws a plate on its short edge and this deck holds it on its long one, so the
+    usual plate is a quarter turn out - and it would otherwise overhang the zone silently."""
+    landscape = Resource(name="plate", size_x=127.76, size_y=85.48, size_z=14.35)
+    with self.assertRaises(ValueError) as caught:
+      self.deck.assign_child_at_zone(landscape, "Zone1")
+    self.assertIn("rotated(z=90)", str(caught.exception))
+    self.assertIn("127.76", str(caught.exception))
+
+  def test_the_same_plate_turned_goes_in(self) -> None:
+    """And the holder works out where the turned labware sits, so its wells land right."""
+    landscape = Resource(name="plate", size_x=127.76, size_y=85.48, size_z=14.35)
+    self.deck.assign_child_at_zone(landscape.rotated(z=90), "Zone1")
+    self.assertIsNotNone(self.deck.zones["Zone1"])
+
+  def test_labware_too_big_either_way_is_not_told_to_turn_it(self) -> None:
+    """Advice that would not work is worse than none."""
+    huge = Resource(name="huge", size_x=200.0, size_y=200.0, size_z=10.0)
+    with self.assertRaises(ValueError) as caught:
+      self.deck.assign_child_at_zone(huge, "Zone1")
+    self.assertIn("would not help", str(caught.exception))
+    self.assertNotIn("rotated", str(caught.exception))
+
+  def test_small_labware_fits_either_way_round(self) -> None:
+    """Only what overhangs is refused."""
+    for resource in (
+      Resource(name="a", size_x=50.0, size_y=60.0, size_z=10.0),
+      Resource(name="b", size_x=60.0, size_y=50.0, size_z=10.0),
+    ):
+      with self.subTest(resource=resource.name):
+        IPrep2Deck().assign_child_at_zone(resource, "Zone1")
+
+  def test_a_refused_plate_leaves_the_zone_empty(self) -> None:
+    """Rather than half-assigned, which nothing downstream would describe."""
+    landscape = Resource(name="plate", size_x=127.76, size_y=85.48, size_z=14.35)
+    with self.assertRaises(ValueError):
+      self.deck.assign_child_at_zone(landscape, "Zone1")
+    self.assertIsNone(self.deck.zones["Zone1"])
+
+
 class ZoneAssignmentTests(unittest.TestCase):
   """Putting labware in a zone."""
 
