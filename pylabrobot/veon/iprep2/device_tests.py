@@ -4,9 +4,9 @@ import unittest
 from typing import Any, Dict, Optional
 
 from pylabrobot.resources.resource import Resource
-from pylabrobot.veon.iprep2.deck_tests import zone_at
 from pylabrobot.veon.iprep2.configuration_tests import CAPABILITIES
 from pylabrobot.veon.iprep2.deck import IPrep2Deck
+from pylabrobot.veon.iprep2.deck_tests import zone_at
 from pylabrobot.veon.iprep2.device import IPrep2, IPrep2Device
 from pylabrobot.veon.iprep2.driver import IPrep2Driver
 from pylabrobot.veon.iprep2.driver_tests import _FakeEvents, _FakeHTTP
