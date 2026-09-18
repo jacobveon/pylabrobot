@@ -263,19 +263,24 @@ class EventTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(await self._seen([event("something_new")]), ["iprep2.something_new"])
 
 
-class CredentialTests(unittest.TestCase):
-  """What the driver refuses to do with a key."""
+class CredentialTests(unittest.IsolatedAsyncioTestCase):
+  """What the driver refuses to do with a key.
 
-  def test_a_key_without_tls_is_refused(self) -> None:
+  Asynchronous although nothing here awaits: building a driver builds a `pylabrobot.io.HTTP`,
+  which constructs an asyncio primitive in its own constructor, and on Python 3.9 that needs a
+  loop to exist. Running these inside one keeps the test about credentials rather than about that.
+  """
+
+  async def test_a_key_without_tls_is_refused(self) -> None:
     """It would go on the wire in clear text, which is what a key is meant to avoid."""
     with self.assertRaises(ValueError) as caught:
       IPrep2Driver(host="iprep2.local", api_key="secret-token")
     self.assertIn("clear text", str(caught.exception))
     self.assertNotIn("secret-token", str(caught.exception))
 
-  def test_a_key_over_tls_is_allowed(self) -> None:
+  async def test_a_key_over_tls_is_allowed(self) -> None:
     IPrep2Driver(host="iprep2.example.com", api_key="secret-token", secure=True)
 
-  def test_no_key_needs_no_tls(self) -> None:
+  async def test_no_key_needs_no_tls(self) -> None:
     """An instrument on a bench is unauthenticated, which is the common case."""
     IPrep2Driver(host="iprep2.local")

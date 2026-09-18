@@ -1,7 +1,8 @@
 """The device tier: one tree, and what it says when the instrument disagrees with it."""
 
+import logging
 import unittest
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pylabrobot.resources.resource import Resource
 from pylabrobot.veon.iprep2.configuration_tests import CAPABILITIES
@@ -15,6 +16,17 @@ EMPTY_DECK: Dict[str, Any] = {zone: {} for zone in CAPABILITIES["deck"]["zones"]
 NO_CALIBRATION: Dict[str, Any] = {
   "zones": {zone: {"x": 0.0, "y": 0.0, "z": 0.0} for zone in EMPTY_DECK}
 }
+
+
+class _WarningCatcher(logging.Handler):
+  """Keeps every record it is given, so a test can assert there were none."""
+
+  def __init__(self) -> None:
+    super().__init__(level=logging.WARNING)
+    self.records: List[logging.LogRecord] = []
+
+  def emit(self, record: logging.LogRecord) -> None:
+    self.records.append(record)
 
 
 def labware(name: str = "plate") -> Resource:
@@ -111,8 +123,15 @@ class DivergenceTests(unittest.IsolatedAsyncioTestCase):
     return device
 
   async def test_a_matching_deck_says_nothing(self) -> None:
-    with self.assertNoLogs("pylabrobot.veon.iprep2.device", level="WARNING"):
+    # `assertNoLogs` arrived in Python 3.10 and this package supports 3.9, so the absence of a
+    # warning is checked by capturing and finding nothing.
+    captured = _WarningCatcher()
+    logging.getLogger("pylabrobot.veon.iprep2.device").addHandler(captured)
+    try:
       await self._device().setup()
+    finally:
+      logging.getLogger("pylabrobot.veon.iprep2.device").removeHandler(captured)
+    self.assertEqual(captured.records, [])
 
   async def test_labware_on_the_instrument_that_this_model_lacks_is_reported(self) -> None:
     """A zone the instrument believes is loaded and this model believes is empty will behave in
