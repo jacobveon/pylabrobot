@@ -1,0 +1,176 @@
+"""The standard deck's geometry, and what the instrument's calibration does to it."""
+
+import unittest
+
+from pylabrobot.resources.coordinate import Coordinate
+from pylabrobot.resources.resource import Resource
+from pylabrobot.veon.iprep2.deck import (
+  ZONE_NAMES,
+  ZONE_SIZE_X,
+  ZONE_SIZE_Y,
+  IPrep2Deck,
+)
+
+
+def zone_at(deck: IPrep2Deck, zone: str) -> Coordinate:
+  """Where a zone holder sits, which it always does.
+
+  Args:
+    deck: the deck to look on.
+    zone: the zone to find.
+
+  Returns:
+    Its location.
+  """
+  location = deck.get_resource(f"{deck.name}_{zone}").location
+  assert location is not None
+  return location
+
+
+def labware(name: str = "plate") -> Resource:
+  """Something zone-sized to put in a zone.
+
+  Args:
+    name: what to call it.
+
+  Returns:
+    The resource.
+  """
+  return Resource(name=name, size_x=85.48, size_y=127.76, size_z=14.35)
+
+
+class DeckGeometryTests(unittest.TestCase):
+  """Where the zones are."""
+
+  def setUp(self) -> None:
+    self.deck = IPrep2Deck()
+
+  def test_the_standard_deck_has_six_zones(self) -> None:
+    self.assertEqual(self.deck.zone_names, ZONE_NAMES)
+    self.assertEqual(len(ZONE_NAMES), 6)
+
+  def test_a_zone_is_where_the_definition_puts_it(self) -> None:
+    """The origin corner a labware component's own coordinates are added to."""
+    self.assertEqual(zone_at(self.deck, "Zone1"), Coordinate(74.933, 149.630, 0.0))
+
+  def test_zones_are_laid_out_in_two_rows_of_three(self) -> None:
+    """Which is what the instrument's own deck definition describes."""
+    locations = {zone: zone_at(self.deck, zone) for zone in self.deck.zone_names}
+    back = [z for z, c in locations.items() if c.y > 100]
+    front = [z for z, c in locations.items() if c.y < 100]
+    self.assertEqual(sorted(back), ["Zone1", "Zone2", "Zone3"])
+    self.assertEqual(sorted(front), ["Zone4", "Zone5", "Zone6"])
+
+  def test_the_deck_is_not_perfectly_flat(self) -> None:
+    """The instrument reports each zone's surface separately, and they differ by a third of a
+    millimetre. Saying so costs nothing and modelling them all level would be a small lie."""
+    heights = {zone: zone_at(self.deck, zone).z for zone in self.deck.zone_names}
+    self.assertEqual(max(heights.values()), 0.0)
+    self.assertAlmostEqual(min(heights.values()), -0.345, places=3)
+
+  def test_every_zone_takes_the_same_footprint(self) -> None:
+    """An SBS plate stood on its long edge, which is how this deck takes one."""
+    for zone in self.deck.zone_names:
+      holder = self.deck.get_resource(f"deck_{zone}")
+      self.assertEqual((holder.get_size_x(), holder.get_size_y()), (ZONE_SIZE_X, ZONE_SIZE_Y))
+
+  def test_a_deck_can_be_built_with_a_subset_of_zones(self) -> None:
+    """For an instrument that reports fewer than the standard deck's."""
+    self.assertEqual(IPrep2Deck(zones=("Zone1", "Zone4")).zone_names, ("Zone1", "Zone4"))
+
+  def test_an_unknown_zone_is_refused_with_what_is_available(self) -> None:
+    """A deck this definition does not describe needs its own definition, not a guess."""
+    with self.assertRaises(ValueError) as caught:
+      IPrep2Deck(zones=("Zone1", "Zone9"))
+    self.assertIn("Zone9", str(caught.exception))
+    self.assertIn("Zone1", str(caught.exception))
+
+
+class ZoneAssignmentTests(unittest.TestCase):
+  """Putting labware in a zone."""
+
+  def setUp(self) -> None:
+    self.deck = IPrep2Deck()
+
+  def test_labware_lands_at_the_zones_origin(self) -> None:
+    plate = labware()
+    self.deck.assign_child_at_zone(plate, "Zone2")
+    self.assertEqual(plate.get_absolute_location(), Coordinate(176.303, 149.318, -0.009))
+
+  def test_a_zone_holds_one_thing(self) -> None:
+    self.deck.assign_child_at_zone(labware("first"), "Zone1")
+    with self.assertRaises(ValueError) as caught:
+      self.deck.assign_child_at_zone(labware("second"), "Zone1")
+    self.assertIn("first", str(caught.exception))
+
+  def test_an_unknown_zone_names_the_ones_there_are(self) -> None:
+    with self.assertRaises(ValueError) as caught:
+      self.deck.assign_child_at_zone(labware(), "Zone9")
+    self.assertIn("Zone1", str(caught.exception))
+
+  def test_what_is_in_each_zone_can_be_read_back(self) -> None:
+    plate = labware()
+    self.deck.assign_child_at_zone(plate, "Zone3")
+    self.assertIs(self.deck.zones["Zone3"], plate)
+    self.assertIsNone(self.deck.zones["Zone1"])
+    self.assertEqual(self.deck.get_zone(plate), "Zone3")
+
+  def test_labware_can_be_taken_out_again(self) -> None:
+    plate = labware()
+    self.deck.assign_child_at_zone(plate, "Zone3")
+    self.deck.unassign_child_resource(plate)
+    self.assertIsNone(self.deck.zones["Zone3"])
+    self.assertIsNone(self.deck.get_zone(plate))
+
+  def test_labware_cannot_be_put_straight_on_the_deck(self) -> None:
+    """It would land somewhere no zone describes, and the instrument addresses zones."""
+    with self.assertRaises(ValueError) as caught:
+      self.deck.assign_child_resource(labware(), location=Coordinate(0, 0, 0))
+    self.assertIn("assign_child_at_zone", str(caught.exception))
+
+  def test_the_summary_says_what_is_where(self) -> None:
+    self.deck.assign_child_at_zone(labware("source"), "Zone2")
+    summary = self.deck.summary()
+    self.assertIn("Zone2: source", summary)
+    self.assertIn("Zone1: -", summary)
+
+
+class CalibrationTests(unittest.TestCase):
+  """What the instrument measured, applied to what the definition drew."""
+
+  def setUp(self) -> None:
+    self.deck = IPrep2Deck()
+
+  def test_an_offset_moves_the_zone(self) -> None:
+    self.deck.apply_calibration({"Zone1": {"x": 1.5, "y": -0.5, "z": 0.0}})
+    self.assertEqual(zone_at(self.deck, "Zone1"), Coordinate(76.433, 149.130, 0.0))
+
+  def test_a_positive_z_offset_lowers_the_zone(self) -> None:
+    """The instrument measures Z downward from the head, so further from the head is lower, and
+    PyLabRobot measures it upward. The sign flips."""
+    self.deck.apply_calibration({"Zone1": {"x": 0.0, "y": 0.0, "z": 0.25}})
+    self.assertAlmostEqual(zone_at(self.deck, "Zone1").z, -0.25, places=6)
+
+  def test_calibration_replaces_rather_than_accumulates(self) -> None:
+    """Applying what the instrument currently reports must not drift by how many times it was
+    read."""
+    for _ in range(3):
+      self.deck.apply_calibration({"Zone1": {"x": 1.0, "y": 0.0, "z": 0.0}})
+    self.assertAlmostEqual(zone_at(self.deck, "Zone1").x, 75.933, places=6)
+
+  def test_an_offset_for_a_zone_that_is_not_here_is_ignored(self) -> None:
+    """The instrument may describe a deck this definition does not; a zone that is not here
+    cannot be moved, and refusing would fail a setup over something that changes nothing."""
+    self.deck.apply_calibration({"Zone9": {"x": 99.0, "y": 0.0, "z": 0.0}})
+    self.assertEqual(zone_at(self.deck, "Zone1"), Coordinate(74.933, 149.630, 0.0))
+
+  def test_a_missing_component_of_an_offset_is_zero(self) -> None:
+    self.deck.apply_calibration({"Zone1": {"x": 2.0}})
+    self.assertEqual(zone_at(self.deck, "Zone1"), Coordinate(76.933, 149.630, 0.0))
+
+  def test_labware_moves_with_its_zone(self) -> None:
+    """Which is the point of the zone being the holder rather than a coordinate looked up."""
+    plate = labware()
+    self.deck.assign_child_at_zone(plate, "Zone1")
+    self.deck.apply_calibration({"Zone1": {"x": 3.0, "y": 0.0, "z": 0.0}})
+    self.assertEqual(plate.get_absolute_location().x, 77.933)

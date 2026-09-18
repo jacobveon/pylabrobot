@@ -1,0 +1,285 @@
+"""The i.prep 2's deck: six zones, and where each one is.
+
+The geometry is a definition rather than a discovery. The instrument reports which zones it has
+and how they have been calibrated, but not where they are, and PyLabRobot needs to know that
+without an instrument to ask - a protocol is laid out, a deck is drawn in the visualizer, and a
+run is planned long before anything is plugged in. So the standard deck is described here, as
+every other PyLabRobot deck is, and what the instrument knows is applied on top of it.
+
+What the instrument contributes is calibration: the per-zone offset an operator measured on the
+bench, which says where this instrument found a zone rather than where the drawing puts it.
+`apply_calibration` moves the zones by it.
+
+A note on Z, because the two frames disagree. PyLabRobot measures Z upward from the deck surface,
+so a taller plate reaches a higher z. The instrument measures it downward from the head's home
+position, so its deck surface reads about 217 mm and a taller plate reaches a *smaller* number.
+Nothing here carries the instrument's frame: zone heights below are PyLabRobot's, and converting
+between the two is the driver's business at the point a move is commanded.
+"""
+
+from typing import Dict, List, Mapping, Optional, Tuple, cast
+
+from pylabrobot.resources.coordinate import Coordinate
+from pylabrobot.resources.deck import Deck
+from pylabrobot.resources.resource import Resource
+from pylabrobot.resources.resource_holder import ResourceHolder
+
+# The standard deck, as the instrument's own deck definition describes it (`iprep2-standard-deck`
+# 1.0.0). One entry per zone: where the labware's origin corner sits on the deck, and how much
+# room the zone gives it.
+#
+# The origin corner is what the instrument adds a labware component's own coordinates to - a well
+# at (11.24, 14.38) in its plate is at the zone's x + 11.24, y + 14.38 - so it is the same point
+# PyLabRobot locates a resource by, and a zone becomes a holder at exactly this position.
+DECK_ID = "iprep2-standard-deck"
+DECK_DEFINITION_VERSION = "1.0.0"
+
+SIZE_X = 350.0
+SIZE_Y = 350.0
+# How far the deck surface stands above the deck resource's own origin.
+SIZE_Z = 217.172
+
+# The height that is clear to travel at, in mm above the deck surface.
+SAFE_TRAVEL_Z = 10.0
+
+# Every zone gives its labware the same room: an SBS footprint stood on its long edge, which is
+# how this deck takes a plate.
+ZONE_SIZE_X = 86.0
+ZONE_SIZE_Y = 128.25
+
+# Where each zone's origin corner sits, in mm on the deck surface, and how far that zone's
+# surface sits below the highest one. Six zones in two rows of three.
+#
+# The z figures come from the instrument reporting each zone's surface in its own downward frame
+# (217.172 to 217.517 mm from home). Subtracting each from the shallowest gives how much lower
+# that zone sits than the highest, which is what PyLabRobot's upward frame wants: a zone reading
+# further from home is a zone whose surface is further down. The spread is a third of a
+# millimetre - the deck is not perfectly flat, and saying so costs nothing.
+_HIGHEST_SURFACE_FROM_HOME = 217.172
+_ZONE_POSITIONS: Dict[str, Tuple[float, float, float]] = {
+  "Zone1": (74.933, 149.630, 217.172),
+  "Zone2": (176.303, 149.318, 217.181),
+  "Zone3": (276.901, 149.311, 217.255),
+  "Zone4": (74.699, -4.437, 217.517),
+  "Zone5": (176.183, -4.487, 217.422),
+  "Zone6": (277.028, -4.486, 217.419),
+}
+
+ZONE_NAMES: Tuple[str, ...] = tuple(_ZONE_POSITIONS)
+
+
+def _zone_location(zone: str) -> Coordinate:
+  """Where a zone sits on the deck, in PyLabRobot's frame.
+
+  Args:
+    zone: the zone's name.
+
+  Returns:
+    Its origin corner, with z measured upward from the highest zone's surface.
+  """
+  x, y, from_home = _ZONE_POSITIONS[zone]
+  return Coordinate(x, y, _HIGHEST_SURFACE_FROM_HOME - from_home)
+
+
+class IPrep2Deck(Deck):
+  """The deck of an i.prep 2.
+
+  Each zone is a :class:`~pylabrobot.resources.resource_holder.ResourceHolder` child of the deck,
+  so labware placed in a zone is a descendant of the deck carrying it and its wells locate
+  against the instrument's own coordinates without anything further being worked out.
+
+  Labware goes in with :meth:`assign_child_at_zone`, named as the instrument names the zone.
+  """
+
+  def __init__(
+    self,
+    name: str = "deck",
+    size_x: float = SIZE_X,
+    size_y: float = SIZE_Y,
+    size_z: float = SIZE_Z,
+    origin: Coordinate = Coordinate(0, 0, 0),
+    zones: Optional[Tuple[str, ...]] = None,
+  ):
+    """
+    Args:
+      name: what to call this deck in the resource tree.
+      size_x: how wide it is, in mm.
+      size_y: how deep it is, in mm.
+      size_z: how far its surface stands above its origin, in mm.
+      origin: where the deck sits in whatever carries it.
+      zones: which zones to build, for an instrument that reports a subset of the standard deck's.
+        Defaults to all six.
+
+    Raises:
+      ValueError: If a zone is named that this deck definition does not describe.
+    """
+    super().__init__(
+      name=name, size_x=size_x, size_y=size_y, size_z=size_z, origin=origin, category="deck"
+    )
+
+    wanted = ZONE_NAMES if zones is None else tuple(zones)
+    unknown = [zone for zone in wanted if zone not in _ZONE_POSITIONS]
+    if unknown:
+      raise ValueError(
+        f"the {DECK_ID} definition does not describe {', '.join(unknown)}. It has: "
+        f"{', '.join(ZONE_NAMES)}. An instrument with a different deck needs its own definition."
+      )
+
+    self._zone_holders: Dict[str, ResourceHolder] = {}
+    for zone in wanted:
+      holder = ResourceHolder(
+        name=f"{name}_{zone}",
+        size_x=ZONE_SIZE_X,
+        size_y=ZONE_SIZE_Y,
+        size_z=0,
+        category="iprep2_zone",
+        model=f"{DECK_ID}_zone",
+      )
+      self._zone_holders[zone] = holder
+      super().assign_child_resource(holder, location=_zone_location(zone))
+
+  # ----------------------------------------
+  # Zones
+  # ----------------------------------------
+
+  @property
+  def zone_names(self) -> Tuple[str, ...]:
+    """The zones this deck has, in the order the definition lists them.
+
+    Returns:
+      The zone names.
+    """
+    return tuple(self._zone_holders)
+
+  @property
+  def zones(self) -> Dict[str, Optional[Resource]]:
+    """What is in each zone, None for a zone holding nothing.
+
+    Returns:
+      One entry per zone.
+    """
+    return {zone: holder.resource for zone, holder in self._zone_holders.items()}
+
+  def assign_child_at_zone(self, resource: Resource, zone: str) -> None:
+    """Put labware in a zone.
+
+    Args:
+      resource: the labware.
+      zone: which zone, named as the instrument names it.
+
+    Raises:
+      ValueError: If there is no such zone, or something is already in it.
+    """
+    holder = self._zone_holders.get(zone)
+    if holder is None:
+      raise ValueError(f"no zone {zone!r} on this deck; it has {', '.join(self.zone_names)}")
+    if holder.resource is not None:
+      raise ValueError(f"{zone} already holds {holder.resource.name}")
+    holder.assign_child_resource(resource)
+
+  def unassign_child_resource(self, resource: Resource) -> None:
+    """Take labware out of whichever zone holds it.
+
+    Args:
+      resource: the labware to remove.
+    """
+    for holder in self._zone_holders.values():
+      if holder.resource is resource:
+        holder.unassign_child_resource(resource)
+        return
+    super().unassign_child_resource(resource)
+
+  def get_zone(self, resource: Resource) -> Optional[str]:
+    """Which zone holds a resource.
+
+    Args:
+      resource: the labware to find.
+
+    Returns:
+      The zone's name, or None if this deck is not holding it.
+    """
+    for zone, holder in self._zone_holders.items():
+      if holder.resource is resource:
+        return zone
+    return None
+
+  # ----------------------------------------
+  # Calibration
+  # ----------------------------------------
+
+  def apply_calibration(self, offsets: Mapping[str, Mapping[str, float]]) -> None:
+    """Move the zones by what the instrument measured.
+
+    The definition says where a zone is drawn; this says where this instrument found it. An offset
+    for a zone this deck does not have is ignored rather than refused: the instrument may describe
+    a deck this definition does not, and a zone that is not here cannot be moved.
+
+    The instrument's z offset is in its own downward frame, so a positive one means the zone
+    turned out to be *further* from the head - lower - and it is subtracted rather than added.
+
+    Args:
+      offsets: the per-zone offset, as `GET /calibration/zones` reports it.
+    """
+    for zone, offset in offsets.items():
+      holder = self._zone_holders.get(zone)
+      if holder is None:
+        continue
+      base = _zone_location(zone)
+      holder.location = Coordinate(
+        base.x + float(offset.get("x", 0.0) or 0.0),
+        base.y + float(offset.get("y", 0.0) or 0.0),
+        base.z - float(offset.get("z", 0.0) or 0.0),
+      )
+
+  # ----------------------------------------
+  # Resource tree
+  # ----------------------------------------
+
+  def assign_child_resource(
+    self,
+    resource: Resource,
+    location: Optional[Coordinate] = None,
+    reassign: bool = True,
+  ) -> None:
+    """Assign a zone holder to the deck.
+
+    The deck's own children are the zone holders built in `__init__`. Labware goes into a zone
+    with `assign_child_at_zone` rather than onto the deck, so that it lands where the instrument
+    believes that zone is. Deserialization re-assigns the holders by name, replacing a placeholder
+    with the loaded one and whatever labware it carries.
+
+    Args:
+      resource: the holder to assign.
+      location: where it sits.
+      reassign: whether to replace a holder of the same name.
+
+    Raises:
+      ValueError: If something other than a zone holder is assigned directly to the deck.
+    """
+    existing = next((child for child in self.children if child.name == resource.name), None)
+    if existing is not None:
+      if not reassign:
+        raise ValueError(f"{resource.name!r} is already assigned to this deck")
+      super().unassign_child_resource(existing)
+      for zone, holder in self._zone_holders.items():
+        if holder is existing:
+          self._zone_holders[zone] = cast(ResourceHolder, resource)
+          break
+    elif not isinstance(resource, ResourceHolder):
+      raise ValueError(
+        f"cannot assign {resource.name!r} straight to the deck: labware goes in a zone, with "
+        f"assign_child_at_zone(resource, 'Zone1')"
+      )
+    super().assign_child_resource(resource, location=location, reassign=reassign)
+
+  def summary(self) -> str:
+    """What is on the deck, zone by zone.
+
+    Returns:
+      One line per zone.
+    """
+    lines: List[str] = [f"{self.name} ({DECK_ID} {DECK_DEFINITION_VERSION})"]
+    for zone, holder in self._zone_holders.items():
+      held = holder.resource
+      lines.append(f"  {zone}: {held.name if held is not None else '-'}")
+    return "\n".join(lines)
