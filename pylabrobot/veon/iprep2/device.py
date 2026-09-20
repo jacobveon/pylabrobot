@@ -72,7 +72,7 @@ class IPrep2Device(Resource):
         host=host, port=port, api_key=api_key, secure=secure, follow_events=follow_events
       )
     )
-    self.assign_child_resource(deck, location=Coordinate(0, 0, 0))
+    self.assign_child_resource(deck, location=deck.location or Coordinate(0, 0, 0))
 
   # ----------------------------------------
   # What this instrument turned out to be
@@ -125,10 +125,19 @@ class IPrep2Device(Resource):
 
     What the instrument was left holding is reported rather than tidied. Whether it is safe to
     home an instrument or eject a tip depends on what is underneath, and this has not looked yet.
+
+    Raises:
+      IPrep2Error: If the instrument would not say what it is, or how its deck is calibrated. A
+        deck placed against an unknown calibration is a deck placed wrong, so this is not tolerated
+        the way an unreadable deck state is. Whatever was opened is closed again first.
     """
     await self.driver.setup()
-    self._check_zones_match()
-    self.deck.apply_calibration(await self.driver.request_zone_calibration())
+    try:
+      self._check_zones_match()
+      self.deck.apply_calibration(await self.driver.request_zone_calibration())
+    except BaseException:
+      await self.driver.stop()
+      raise
     await self._report_deck_divergence()
 
   async def stop(self) -> None:

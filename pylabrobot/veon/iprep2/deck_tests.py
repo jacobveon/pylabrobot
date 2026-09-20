@@ -129,6 +129,21 @@ class FitTests(unittest.TestCase):
       with self.subTest(resource=resource.name):
         IPrep2Deck().assign_child_at_zone(resource, "Zone1")
 
+  def test_labware_is_measured_in_its_own_frame_not_its_old_parents(self) -> None:
+    """A plate coming off a turned carrier is judged as it will sit in the zone, not as it sat on
+    the carrier: the holder it is going into is not rotated, whatever it is leaving was."""
+    carrier = Resource(name="carrier", size_x=300.0, size_y=300.0, size_z=1.0)
+    carrier.rotate(z=90)
+    upright = labware()
+    carrier.assign_child_resource(upright, location=Coordinate(0, 0, 0))
+    self.deck.assign_child_at_zone(upright, "Zone1")
+    self.assertIs(self.deck.zones["Zone1"], upright)
+
+    landscape = Resource(name="plate", size_x=127.76, size_y=85.48, size_z=14.35)
+    carrier.assign_child_resource(landscape, location=Coordinate(0, 0, 0))
+    with self.assertRaises(ValueError):
+      IPrep2Deck().assign_child_at_zone(landscape, "Zone2")
+
   def test_a_refused_plate_leaves_the_zone_empty(self) -> None:
     """Rather than half-assigned, which nothing downstream would describe."""
     landscape = Resource(name="plate", size_x=127.76, size_y=85.48, size_z=14.35)
@@ -173,6 +188,27 @@ class ZoneAssignmentTests(unittest.TestCase):
     self.assertIsNone(self.deck.zones["Zone3"])
     self.assertIsNone(self.deck.get_zone(plate))
 
+  def test_clearing_the_deck_empties_the_zones_and_keeps_them(self) -> None:
+    """The zones are the deck. What goes is the labware, and a plate put down afterwards is still
+    in the tree rooted at the deck."""
+    self.deck.assign_child_at_zone(labware("first"), "Zone1")
+    self.deck.clear()
+    self.assertIsNone(self.deck.zones["Zone1"])
+    self.assertEqual(self.deck.zone_names, ZONE_NAMES)
+    plate = labware("second")
+    self.deck.assign_child_at_zone(plate, "Zone1")
+    self.assertIs(plate.get_root(), self.deck)
+
+  def test_a_zone_cannot_be_taken_off_the_deck(self) -> None:
+    """A deck that had lost one would still describe it."""
+    holder = self.deck.get_resource("deck_Zone1")
+    with self.assertRaises(ValueError) as caught:
+      self.deck.unassign_child_resource(holder)
+    self.assertIn("Zone1", str(caught.exception))
+    with self.assertRaises(ValueError):
+      holder.unassign()
+    self.assertIn(holder, self.deck.children)
+
   def test_labware_cannot_be_put_straight_on_the_deck(self) -> None:
     """It would land somewhere no zone describes, and the instrument addresses zones."""
     with self.assertRaises(ValueError) as caught:
@@ -215,6 +251,13 @@ class CalibrationTests(unittest.TestCase):
     self.deck.apply_calibration({"Zone9": {"x": 99.0, "y": 0.0, "z": 0.0}})
     self.assertEqual(zone_at(self.deck, "Zone1"), Coordinate(74.933, 149.630, 0.0))
 
+  def test_a_zone_with_no_calibration_sits_where_the_definition_draws_it(self) -> None:
+    """`null` rather than zeros: the zone has not been calibrated, which is not a reason to fail
+    setup, and not a reason to leave it wherever an earlier calibration put it either."""
+    self.deck.apply_calibration({"Zone1": {"x": 3.0, "y": 0.0, "z": 0.0}})
+    self.deck.apply_calibration({"Zone1": None})
+    self.assertEqual(zone_at(self.deck, "Zone1"), Coordinate(74.933, 149.630, 0.0))
+
   def test_a_missing_component_of_an_offset_is_zero(self) -> None:
     self.deck.apply_calibration({"Zone1": {"x": 2.0}})
     self.assertEqual(zone_at(self.deck, "Zone1"), Coordinate(76.933, 149.630, 0.0))
@@ -225,3 +268,36 @@ class CalibrationTests(unittest.TestCase):
     self.deck.assign_child_at_zone(plate, "Zone1")
     self.deck.apply_calibration({"Zone1": {"x": 3.0, "y": 0.0, "z": 0.0}})
     self.assertEqual(plate.get_absolute_location().x, 77.933)
+
+
+class SerializationTests(unittest.TestCase):
+  """A deck that has been laid out comes back as it was laid out."""
+
+  def test_a_loaded_deck_round_trips(self) -> None:
+    """With its labware in the zone it was in, and its calibration applied."""
+    deck = IPrep2Deck()
+    deck.apply_calibration({"Zone1": {"x": 1.5, "y": 0.0, "z": 0.0}})
+    deck.assign_child_at_zone(labware("source"), "Zone1")
+
+    loaded = IPrep2Deck.deserialize(deck.serialize())
+
+    self.assertEqual(loaded.zone_names, ZONE_NAMES)
+    held = loaded.zones["Zone1"]
+    assert held is not None
+    self.assertEqual(held.name, "source")
+    self.assertIs(held.get_root(), loaded)
+    self.assertEqual(zone_at(loaded, "Zone1"), Coordinate(76.433, 149.630, 0.0))
+    self.assertEqual(len(loaded.children), 6)
+
+  def test_a_deck_built_with_fewer_zones_comes_back_with_the_same_few(self) -> None:
+    deck = IPrep2Deck(zones=("Zone1", "Zone4"))
+    loaded = IPrep2Deck.deserialize(deck.serialize())
+    self.assertEqual(loaded.zone_names, ("Zone1", "Zone4"))
+
+  def test_a_deck_can_be_copied(self) -> None:
+    """Which is what `rotated` and `at` do under the hood."""
+    deck = IPrep2Deck()
+    deck.assign_child_at_zone(labware(), "Zone2")
+    copied = deck.copy()
+    self.assertIsNotNone(copied.zones["Zone2"])
+    self.assertIsNot(copied.zones["Zone2"], deck.zones["Zone2"])

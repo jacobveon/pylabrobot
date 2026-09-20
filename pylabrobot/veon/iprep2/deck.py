@@ -17,12 +17,13 @@ Nothing here carries the instrument's frame: zone heights below are PyLabRobot's
 between the two is the driver's business at the point a move is commanded.
 """
 
-from typing import Dict, List, Mapping, Optional, Tuple, cast
+from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
 
 from pylabrobot.resources.coordinate import Coordinate
 from pylabrobot.resources.deck import Deck
 from pylabrobot.resources.resource import Resource
 from pylabrobot.resources.resource_holder import ResourceHolder
+from pylabrobot.utils.linalg import matrix_vector_multiply_3x3
 
 # The standard deck, as the instrument's own deck definition describes it (`iprep2-standard-deck`
 # 1.0.0). One entry per zone: where the labware's origin corner sits on the deck, and how much
@@ -81,6 +82,35 @@ def _zone_location(zone: str) -> Coordinate:
   return Coordinate(x, y, _HIGHEST_SURFACE_FROM_HOME - from_home)
 
 
+def _footprint(resource: Resource) -> Tuple[float, float]:
+  """How much of a zone a resource takes, in the frame it will be held in.
+
+  A zone holder is not rotated, so what matters is the resource's own rotation and nothing above
+  it: `get_absolute_size_x` would include whatever the resource currently sits under, and labware
+  being moved off a turned carrier would be measured in the carrier's frame rather than the
+  zone's.
+
+  Args:
+    resource: the labware.
+
+  Returns:
+    Its width and depth on the deck, in mm.
+  """
+  matrix = resource.rotation.get_rotation_matrix()
+  corners = [
+    Coordinate(*matrix_vector_multiply_3x3(matrix, corner.vector()))
+    for corner in (
+      Coordinate(0, 0, 0),
+      Coordinate(resource.get_size_x(), 0, 0),
+      Coordinate(0, resource.get_size_y(), 0),
+      Coordinate(resource.get_size_x(), resource.get_size_y(), 0),
+    )
+  ]
+  xs = [corner.x for corner in corners]
+  ys = [corner.y for corner in corners]
+  return max(xs) - min(xs), max(ys) - min(ys)
+
+
 class IPrep2Deck(Deck):
   """The deck of an i.prep 2.
 
@@ -99,6 +129,8 @@ class IPrep2Deck(Deck):
     size_z: float = SIZE_Z,
     origin: Coordinate = Coordinate(0, 0, 0),
     zones: Optional[Tuple[str, ...]] = None,
+    category: str = "deck",
+    metadata: Optional[Mapping[str, Any]] = None,
   ):
     """
     Args:
@@ -109,12 +141,21 @@ class IPrep2Deck(Deck):
       origin: where the deck sits in whatever carries it.
       zones: which zones to build, for an instrument that reports a subset of the standard deck's.
         Defaults to all six.
+      category: which kind of resource this is. `serialize` writes it and `deserialize` hands it
+        back, so it is taken here even though a deck is always a deck.
+      metadata: likewise, anything a caller attached to the deck.
 
     Raises:
       ValueError: If a zone is named that this deck definition does not describe.
     """
     super().__init__(
-      name=name, size_x=size_x, size_y=size_y, size_z=size_z, origin=origin, category="deck"
+      name=name,
+      size_x=size_x,
+      size_y=size_y,
+      size_z=size_z,
+      origin=origin,
+      category=category,
+      metadata=metadata,
     )
 
     wanted = ZONE_NAMES if zones is None else tuple(zones)
@@ -176,7 +217,7 @@ class IPrep2Deck(Deck):
     Raises:
       ValueError: If it does not fit as it stands.
     """
-    width, depth = resource.get_absolute_size_x(), resource.get_absolute_size_y()
+    width, depth = _footprint(resource)
     if width <= ZONE_SIZE_X and depth <= ZONE_SIZE_Y:
       return
 
@@ -221,12 +262,32 @@ class IPrep2Deck(Deck):
 
     Args:
       resource: the labware to remove.
+
+    Raises:
+      ValueError: If the resource is one of the zones themselves. A zone is part of the deck, and
+        a deck that had lost one would still answer for it - `zone_names` and
+        `assign_child_at_zone` would go on describing a holder that was no longer in the tree.
     """
-    for holder in self._zone_holders.values():
+    for zone, holder in self._zone_holders.items():
+      if holder is resource:
+        raise ValueError(
+          f"{zone} is part of this deck and cannot be taken off it; take out what it holds instead"
+        )
       if holder.resource is resource:
         holder.unassign_child_resource(resource)
         return
     super().unassign_child_resource(resource)
+
+  def clear(self, include_trash: bool = False) -> None:
+    """Take every piece of labware off the deck. The zones stay.
+
+    Args:
+      include_trash: accepted for compatibility with other decks; this one has no trash area.
+    """
+    for holder in self._zone_holders.values():
+      held = holder.resource
+      if held is not None:
+        holder.unassign_child_resource(held)
 
   def get_zone(self, resource: Resource) -> Optional[str]:
     """Which zone holds a resource.
@@ -246,7 +307,7 @@ class IPrep2Deck(Deck):
   # Calibration
   # ----------------------------------------
 
-  def apply_calibration(self, offsets: Mapping[str, Mapping[str, float]]) -> None:
+  def apply_calibration(self, offsets: Mapping[str, Optional[Mapping[str, float]]]) -> None:
     """Move the zones by what the instrument measured.
 
     The definition says where a zone is drawn; this says where this instrument found it. An offset
@@ -256,6 +317,9 @@ class IPrep2Deck(Deck):
     The instrument's z offset is in its own downward frame, so a positive one means the zone
     turned out to be *further* from the head - lower - and it is subtracted rather than added.
 
+    A zone reported with no offset at all - `null`, rather than zeros - has not been calibrated,
+    and sits where the definition draws it.
+
     Args:
       offsets: the per-zone offset, as `GET /calibration/zones` reports it.
     """
@@ -263,6 +327,8 @@ class IPrep2Deck(Deck):
       holder = self._zone_holders.get(zone)
       if holder is None:
         continue
+      if not isinstance(offset, Mapping):
+        offset = {}
       base = _zone_location(zone)
       holder.location = Coordinate(
         base.x + float(offset.get("x", 0.0) or 0.0),
@@ -310,6 +376,18 @@ class IPrep2Deck(Deck):
         f"assign_child_at_zone(resource, 'Zone1')"
       )
     super().assign_child_resource(resource, location=location, reassign=reassign)
+
+  def serialize(self) -> dict:
+    """This deck, with which zones it was built with.
+
+    The zones are children and go round with the rest of the tree, but which ones to *build* is a
+    constructor argument, and a deck built with fewer than the standard six has to come back with
+    the same few rather than with all of them plus the loaded ones replacing some.
+
+    Returns:
+      The serialized deck.
+    """
+    return {**super().serialize(), "zones": list(self.zone_names)}
 
   def summary(self) -> str:
     """What is on the deck, zone by zone.

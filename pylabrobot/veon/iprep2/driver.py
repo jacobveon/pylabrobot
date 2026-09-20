@@ -19,9 +19,9 @@ it.
 import asyncio
 import json
 import logging
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional
 
-from pylabrobot.events import emit_event
+from pylabrobot.events import device_reference, emit_event
 from pylabrobot.io.http import HTTP, HTTPError
 from pylabrobot.io.websocket import WebSocket
 from pylabrobot.veon.iprep2.configuration import (
@@ -364,17 +364,27 @@ class IPrep2Driver:
   # ----------------------------------------
 
   async def _start_following_events(self) -> None:
-    """Open the instrument's event stream and start putting what arrives on the event bus."""
+    """Open the instrument's event stream and start putting what arrives on the event bus.
+
+    A task already following it is stopped first, so a repeated `setup` leaves one follower and
+    not two: the old one would otherwise outlive `stop`, and report the stream it was reading as
+    ended when the new one is following fine.
+    """
+    await self._cancel_follower()
     await self.events_io.setup()
     self._events_task = asyncio.create_task(self._follow())
 
   async def _stop_following_events(self) -> None:
     """Stop following the stream and close it."""
+    await self._cancel_follower()
+    await self.events_io.stop()
+
+  async def _cancel_follower(self) -> None:
+    """End the task reading the stream, if there is one, and wait for it to go."""
     if self._events_task is not None:
       self._events_task.cancel()
       await asyncio.gather(self._events_task, return_exceptions=True)
       self._events_task = None
-    await self.events_io.stop()
 
   async def _follow(self) -> None:
     """Read the instrument's events until the stream ends, emitting each one.
@@ -424,7 +434,7 @@ class IPrep2Driver:
 
     emit_event(
       f"{EVENT_PREFIX}.{name}",
-      device=f"{self.host}:{self.port}",
+      device=device_reference(self, name=f"{self.host}:{self.port}"),
       timestamp=event.get("timestamp"),
       source=event.get("source"),
       payload=event.get("payload"),
@@ -436,20 +446,3 @@ class IPrep2Driver:
     if identity is None:
       return f"IPrep2Driver({where}, not set up)"
     return f"IPrep2Driver({identity.name or 'i.prep 2'} at {where}, {self.num_channels} channels)"
-
-
-def channels_from(readiness: Readiness, driver: IPrep2Driver) -> List[Tuple[int, bool]]:
-  """Which PyLabRobot channel indices carry a tip, from what readiness reported.
-
-  Args:
-    readiness: what the instrument said about itself.
-    driver: the driver whose channel numbering to convert through.
-
-  Returns:
-    One `(index, has_tip)` pair per channel, in PyLabRobot's indexing.
-  """
-  attached = set(readiness.tips_attached)
-  return [
-    (driver.channel_index(number), number in attached)
-    for number in driver.capabilities.pipette.channels
-  ]

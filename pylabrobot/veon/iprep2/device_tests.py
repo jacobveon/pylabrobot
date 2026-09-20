@@ -4,6 +4,8 @@ import logging
 import unittest
 from typing import Any, Dict, List, Optional
 
+from pylabrobot.io.http import HTTPError
+from pylabrobot.resources.coordinate import Coordinate
 from pylabrobot.resources.resource import Resource
 from pylabrobot.veon.iprep2.configuration_tests import CAPABILITIES
 from pylabrobot.veon.iprep2.deck import IPrep2Deck
@@ -11,6 +13,7 @@ from pylabrobot.veon.iprep2.deck_tests import zone_at
 from pylabrobot.veon.iprep2.device import IPrep2, IPrep2Device
 from pylabrobot.veon.iprep2.driver import IPrep2Driver
 from pylabrobot.veon.iprep2.driver_tests import _FakeEvents, _FakeHTTP
+from pylabrobot.veon.iprep2.errors import IPrep2Error
 
 EMPTY_DECK: Dict[str, Any] = {zone: {} for zone in CAPABILITIES["deck"]["zones"]}
 NO_CALIBRATION: Dict[str, Any] = {
@@ -85,6 +88,29 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
     device = self._device({"/calibration/zones": calibrated})
     await device.setup()
     self.assertAlmostEqual(zone_at(device.deck, "Zone1").x, 76.933, places=6)
+
+  async def test_a_calibration_that_cannot_be_read_closes_what_was_opened(self) -> None:
+    """A deck placed against an unknown calibration is a deck placed wrong, so setup fails - and
+    leaves nothing open behind it."""
+    http = _FakeHTTP(
+      {
+        "/deck/state": EMPTY_DECK,
+        "/calibration/zones": HTTPError("GET", "/calibration/zones", 404, "{}"),
+      }
+    )
+    events = _FakeEvents()
+    device = IPrep2Device(driver=IPrep2Driver(io=http, events_io=events))
+    with self.assertRaises(IPrep2Error):
+      await device.setup()
+    self.assertFalse(http.set_up)
+    self.assertFalse(events.set_up)
+    self.assertIsNone(device.driver._events_task)
+
+  async def test_the_deck_keeps_the_origin_it_was_built_with(self) -> None:
+    """Handing a deck to the device must not move it."""
+    deck = IPrep2Deck(origin=Coordinate(10.0, 20.0, 0.0))
+    IPrep2Device(deck=deck, host="iprep2.local")
+    self.assertEqual(deck.location, Coordinate(10.0, 20.0, 0.0))
 
   async def test_the_factory_builds_one_on_the_standard_deck(self) -> None:
     device = IPrep2(host="iprep2.local")

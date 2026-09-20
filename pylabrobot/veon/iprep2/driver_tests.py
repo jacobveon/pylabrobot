@@ -5,7 +5,7 @@ import json
 import unittest
 from typing import Any, Dict, List, Optional, Union
 
-from pylabrobot.events import EventBus, use_event_bus
+from pylabrobot.events import EventBus, PLREvent, use_event_bus
 from pylabrobot.io.http import HTTP, HTTPError
 from pylabrobot.io.websocket import WebSocket
 from pylabrobot.veon.iprep2.configuration_tests import CAPABILITIES, INFO
@@ -147,6 +147,20 @@ class DriverSetupTests(unittest.IsolatedAsyncioTestCase):
       await driver.setup()
     self.assertFalse(http.set_up)
 
+  async def test_a_second_setup_leaves_one_follower_not_two(self) -> None:
+    """Setup is repeatable. The task following the old stream has to go when the new one starts,
+    or it outlives `stop` and reports a stream as ended that nobody is reading any more."""
+    driver = await self._driver()
+    first = driver._events_task
+    assert first is not None
+    await driver.setup()
+    second = driver._events_task
+    self.assertIsNot(first, second)
+    self.assertTrue(first.cancelled() or first.done())
+    await driver.stop()
+    assert second is not None
+    self.assertTrue(second.done())
+
   async def test_the_event_stream_can_be_left_closed(self) -> None:
     """For a caller that only wants to command the instrument."""
     events = _FakeEvents()
@@ -221,25 +235,43 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
 class EventTests(unittest.IsolatedAsyncioTestCase):
   """Putting what the instrument pushes onto PyLabRobot's event bus."""
 
-  async def _seen(self, messages) -> List[str]:
-    """Run a driver over the given messages and return the event names that reached the bus.
+  async def _events(self, messages) -> List[PLREvent]:
+    """Run a driver over the given messages and return the events that reached the bus.
 
     Args:
       messages: what the stream carries.
 
     Returns:
-      The names, in order.
+      The events, in order.
     """
-    names: List[str] = []
+    seen: List[PLREvent] = []
     bus = EventBus()
-    bus.subscribe(lambda e: names.append(e.name))
+    bus.subscribe(seen.append)
     events = _FakeEvents(messages)
     with use_event_bus(bus):
       driver = IPrep2Driver(io=_FakeHTTP(), events_io=events)
       await driver.setup()
       await events.drained.wait()
       await driver.stop()
-    return names
+    return seen
+
+  async def _seen(self, messages) -> List[str]:
+    """The names of the events that reached the bus, in order.
+
+    Args:
+      messages: what the stream carries.
+
+    Returns:
+      The names.
+    """
+    return [e.name for e in await self._events(messages)]
+
+  async def test_an_event_says_which_device_it_came_from_the_way_others_do(self) -> None:
+    """`device` is a reference like every other emitter's, so a subscriber written against those
+    reads this one the same way."""
+    (seen,) = await self._events([event("tip_pickup")])
+    self.assertEqual(seen.data["device"]["type"], "IPrep2Driver")
+    self.assertEqual(seen.data["device"]["name"], "localhost:11011")
 
   async def test_an_event_reaches_the_bus_under_the_instruments_name(self) -> None:
     names = await self._seen([event("motor_move_started"), event("motor_move_completed")])
