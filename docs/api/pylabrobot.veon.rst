@@ -24,6 +24,7 @@ i.prep 2
    Readiness
    IPrep2Error
    IPrep2ValidationError
+   IPrep2InstrumentError
    IPrep2BusyError
    IPrep2MotionError
    IPrep2TipError

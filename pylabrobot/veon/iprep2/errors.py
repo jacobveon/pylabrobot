@@ -83,11 +83,18 @@ class IPrep2ValidationError(IPrep2Error):
   """
 
 
-class IPrep2BusyError(IPrep2Error):
+class IPrep2InstrumentError(IPrep2Error):
+  """The instrument as a whole is not in a state to take the request - not homed, stopped, or
+  otherwise unready - as distinct from something wrong with what was asked of it."""
+
+
+class IPrep2BusyError(IPrep2InstrumentError):
   """Something else holds the instrument.
 
-  Temporal rather than a fault. `payload["owner"]` says what holds it and `payload["request_id"]`
-  which request, so a caller can say what it is waiting for rather than only that it waited.
+  Temporal rather than a fault, which is why it is its own class within the instrument family:
+  a caller that waits this one out must not wait out an instrument that is stopped or unhomed.
+  `payload["owner"]` says what holds it and `payload["request_id"]` which request, so a caller
+  can say what it is waiting for rather than only that it waited.
   """
 
 
@@ -143,13 +150,20 @@ _FAMILIES: Dict[str, Type[IPrep2Error]] = {
   "CAPACITY": IPrep2CapacityError,
   "CHANNEL": IPrep2Error,
   "DECK": IPrep2DeckError,
-  "INSTRUMENT": IPrep2BusyError,
+  "INSTRUMENT": IPrep2InstrumentError,
   "LLD": IPrep2LiquidLevelError,
   "MOTION": IPrep2MotionError,
   "RESOURCE": IPrep2ResourceError,
   "SERIAL": IPrep2SerialError,
   "TIP": IPrep2TipError,
   "VALIDATION": IPrep2ValidationError,
+}
+
+
+# The few codes that mean something more specific than their family. Busy is the one a caller
+# handles differently from everything else in its family - by waiting - so it is the one named.
+_CODES: Dict[str, Type[IPrep2Error]] = {
+  "INSTRUMENT.BUSY": IPrep2BusyError,
 }
 
 
@@ -189,7 +203,7 @@ def error_from_envelope(http_status: int, envelope: Dict[str, Any]) -> IPrep2Err
       "unknown i.prep 2 error family %r in %r; raising it as IPrep2Error", family, error_code
     )
 
-  return _FAMILIES.get(family, IPrep2Error)(
+  return _CODES.get(error_code, _FAMILIES.get(family, IPrep2Error))(
     error_code=error_code,
     domain=domain,
     http_status=http_status,

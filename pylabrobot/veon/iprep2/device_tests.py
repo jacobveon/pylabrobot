@@ -6,10 +6,9 @@ from typing import Any, Dict, List, Optional
 
 from pylabrobot.io.http import HTTPError
 from pylabrobot.resources.coordinate import Coordinate
-from pylabrobot.resources.resource import Resource
 from pylabrobot.veon.iprep2.configuration_tests import CAPABILITIES
 from pylabrobot.veon.iprep2.deck import IPrep2Deck
-from pylabrobot.veon.iprep2.deck_tests import zone_at
+from pylabrobot.veon.iprep2.deck_tests import labware, zone_at
 from pylabrobot.veon.iprep2.device import IPrep2, IPrep2Device
 from pylabrobot.veon.iprep2.driver import IPrep2Driver
 from pylabrobot.veon.iprep2.driver_tests import _FakeEvents, _FakeHTTP
@@ -32,25 +31,16 @@ class _WarningCatcher(logging.Handler):
     self.records.append(record)
 
 
-def labware(name: str = "plate") -> Resource:
-  """Something to put in a zone.
-
-  Args:
-    name: what to call it.
-
-  Returns:
-    The resource.
-  """
-  return Resource(name=name, size_x=85.48, size_y=127.76, size_z=14.35)
-
-
-class DeviceTests(unittest.IsolatedAsyncioTestCase):
-  """Bringing the device up."""
+class _DeviceTestCase(unittest.IsolatedAsyncioTestCase):
+  """A device on transports that answer without an instrument, for every test here to build."""
 
   def _device(
     self, answers: Optional[Dict[str, Any]] = None, deck: Optional[IPrep2Deck] = None
   ) -> IPrep2Device:
-    """A device on transports that answer without an instrument.
+    """A device whose instrument answers as given.
+
+    The transports are kept on the test case as `http` and `events`, so a test can look at what
+    they were asked and whether they were left open.
 
     Args:
       answers: extra or replacement path answers.
@@ -59,12 +49,17 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
     Returns:
       The device, not yet set up.
     """
-    http = _FakeHTTP(
+    self.http = _FakeHTTP(
       {"/deck/state": EMPTY_DECK, "/calibration/zones": NO_CALIBRATION, **(answers or {})}
     )
-    device = IPrep2Device(deck=deck, driver=IPrep2Driver(io=http, events_io=_FakeEvents()))
+    self.events = _FakeEvents()
+    device = IPrep2Device(deck=deck, driver=IPrep2Driver(io=self.http, events_io=self.events))
     self.addAsyncCleanup(device.stop)
     return device
+
+
+class DeviceTests(_DeviceTestCase):
+  """Bringing the device up."""
 
   async def test_the_deck_is_a_child_of_the_device(self) -> None:
     """One tree, rooted at the instrument, so everything on the deck is a descendant of the
@@ -92,18 +87,11 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
   async def test_a_calibration_that_cannot_be_read_closes_what_was_opened(self) -> None:
     """A deck placed against an unknown calibration is a deck placed wrong, so setup fails - and
     leaves nothing open behind it."""
-    http = _FakeHTTP(
-      {
-        "/deck/state": EMPTY_DECK,
-        "/calibration/zones": HTTPError("GET", "/calibration/zones", 404, "{}"),
-      }
-    )
-    events = _FakeEvents()
-    device = IPrep2Device(driver=IPrep2Driver(io=http, events_io=events))
+    device = self._device({"/calibration/zones": HTTPError("GET", "/calibration/zones", 404, "{}")})
     with self.assertRaises(IPrep2Error):
       await device.setup()
-    self.assertFalse(http.set_up)
-    self.assertFalse(events.set_up)
+    self.assertFalse(self.http.set_up)
+    self.assertFalse(self.events.set_up)
     self.assertIsNone(device.driver._events_task)
 
   async def test_the_deck_keeps_the_origin_it_was_built_with(self) -> None:
@@ -150,27 +138,8 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(device.identity.model, "iprep2")
 
 
-class DivergenceTests(unittest.IsolatedAsyncioTestCase):
+class DivergenceTests(_DeviceTestCase):
   """What it says when the instrument's idea of the deck is not this model's."""
-
-  def _device(
-    self, answers: Optional[Dict[str, Any]] = None, deck: Optional[IPrep2Deck] = None
-  ) -> IPrep2Device:
-    """A device whose instrument answers as given.
-
-    Args:
-      answers: extra or replacement path answers.
-      deck: the deck to carry.
-
-    Returns:
-      The device.
-    """
-    http = _FakeHTTP(
-      {"/deck/state": EMPTY_DECK, "/calibration/zones": NO_CALIBRATION, **(answers or {})}
-    )
-    device = IPrep2Device(deck=deck, driver=IPrep2Driver(io=http, events_io=_FakeEvents()))
-    self.addAsyncCleanup(device.stop)
-    return device
 
   async def test_a_matching_deck_says_nothing(self) -> None:
     # `assertNoLogs` arrived in Python 3.10 and this package supports 3.9, so the absence of a

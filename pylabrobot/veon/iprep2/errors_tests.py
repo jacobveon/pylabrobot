@@ -6,6 +6,7 @@ from pylabrobot.veon.iprep2.errors import (
   IPrep2BusyError,
   IPrep2CapacityError,
   IPrep2Error,
+  IPrep2InstrumentError,
   IPrep2MotionError,
   IPrep2TipError,
   IPrep2ValidationError,
@@ -41,6 +42,19 @@ class ErrorFromEnvelopeTests(unittest.TestCase):
         raised = error_from_envelope(400, envelope(error_code=code, message="x"))
         self.assertIsInstance(raised, expected)
         self.assertEqual(raised.error_code, code)
+
+  def test_only_busy_is_busy(self) -> None:
+    """The instrument family holds more than `BUSY`, and a caller that waits out a busy instrument
+    must not wait out one that is stopped or unhomed. Busy is still an instrument error, so one
+    `except IPrep2InstrumentError` still catches the whole family."""
+    busy = error_from_envelope(409, envelope(error_code="INSTRUMENT.BUSY"))
+    self.assertIsInstance(busy, IPrep2BusyError)
+    self.assertIsInstance(busy, IPrep2InstrumentError)
+    for code in ("INSTRUMENT.NOT_HOMED", "INSTRUMENT.ESTOP", "INSTRUMENT.SOMETHING_NEW"):
+      with self.subTest(code=code):
+        raised = error_from_envelope(409, envelope(error_code=code))
+        self.assertIsInstance(raised, IPrep2InstrumentError)
+        self.assertNotIsInstance(raised, IPrep2BusyError)
 
   def test_an_unknown_family_is_still_raised(self) -> None:
     """New codes are added, and one this does not know is still a failure the caller has to see."""

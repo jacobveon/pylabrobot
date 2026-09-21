@@ -18,6 +18,7 @@ from .errors import (
   IPrep2CapacityError,
   IPrep2DeckError,
   IPrep2Error,
+  IPrep2InstrumentError,
   IPrep2LiquidLevelError,
   IPrep2MotionError,
   IPrep2ResourceError,
