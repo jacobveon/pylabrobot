@@ -67,17 +67,27 @@ class _FakeHTTP(HTTP):
 
 
 class _FakeEvents(WebSocket):
-  """Hands out the messages it was given, then waits as a live stream with nothing to say does."""
+  """Hands out the messages it was given, then waits as a live stream with nothing to say does.
 
-  def __init__(self, messages: Optional[List[Union[str, bytes]]] = None):
+  A message that is an exception is raised from `read` instead, which is how a quiet spell
+  (`TimeoutError`) or a dropped link (`ConnectionError`) is staged.
+  """
+
+  def __init__(
+    self,
+    messages: Optional[List[Union[str, bytes, BaseException]]] = None,
+    fail_to_stop: bool = False,
+  ):
     """
     Args:
       messages: what `read` answers, in order.
+      fail_to_stop: whether `stop` raises, as a socket that will not close does.
     """
     super().__init__(
       human_readable_device_name="fake i.prep 2 events", url="ws://device.invalid/ws"
     )
     self._messages = list(messages or [])
+    self._fail_to_stop = fail_to_stop
     self.drained = asyncio.Event()
     self.set_up = False
 
@@ -86,10 +96,14 @@ class _FakeEvents(WebSocket):
 
   async def stop(self) -> None:
     self.set_up = False
+    if self._fail_to_stop:
+      raise OSError("the socket would not close")
 
   async def read(self, timeout: Optional[float] = None) -> bytes:
     if self._messages:
       message = self._messages.pop(0)
+      if isinstance(message, BaseException):
+        raise message
       return message.encode() if isinstance(message, str) else message
     self.drained.set()
     await asyncio.Event().wait()
@@ -160,6 +174,14 @@ class DriverSetupTests(unittest.IsolatedAsyncioTestCase):
     await driver.stop()
     assert second is not None
     self.assertTrue(second.done())
+
+  async def test_a_failure_to_close_does_not_hide_why_setup_failed(self) -> None:
+    """The caller needs the refusal, not the footnote about a socket on the way out."""
+    http = _FakeHTTP({"/system/capabilities": HTTPError("GET", "/x", 500, "{}")})
+    driver = IPrep2Driver(io=http, events_io=_FakeEvents(fail_to_stop=True))
+    with self.assertLogs("pylabrobot.veon.iprep2.driver", level="WARNING"):
+      with self.assertRaises(IPrep2Error):
+        await driver.setup()
 
   async def test_the_event_stream_can_be_left_closed(self) -> None:
     """For a caller that only wants to command the instrument."""
@@ -289,6 +311,30 @@ class EventTests(unittest.IsolatedAsyncioTestCase):
   async def test_an_event_without_a_name_is_dropped(self) -> None:
     names = await self._seen([json.dumps({"payload": {}}), event("uptime_tick")])
     self.assertEqual(names, ["iprep2.uptime_tick"])
+
+  async def test_a_quiet_spell_does_not_end_the_stream(self) -> None:
+    """The read is bounded so a dead link is noticed, but the bound passing is not the link
+    dying: the follower goes round again and the next event still arrives. `None` would have
+    meant the transport's own 30 s default, which ended the follower on a quiet half-minute."""
+    names = await self._seen([TimeoutError("nothing in 60 s"), event("tip_pickup")])
+    self.assertEqual(names, ["iprep2.tip_pickup"])
+
+  async def test_the_read_is_bounded_not_unbounded(self) -> None:
+    """A bound the follower resumes after, rather than `None`."""
+    asked: List[Optional[float]] = []
+
+    class _Recording(_FakeEvents):
+      async def read(self, timeout: Optional[float] = None) -> bytes:
+        asked.append(timeout)
+        return await super().read(timeout)
+
+    events = _Recording([event("tip_pickup")])
+    driver = IPrep2Driver(io=_FakeHTTP(), events_io=events)
+    await driver.setup()
+    await events.drained.wait()
+    await driver.stop()
+    self.assertTrue(asked)
+    self.assertTrue(all(t is not None and t > 0 for t in asked))
 
   async def test_an_unfamiliar_event_is_passed_on(self) -> None:
     """The instrument adds events; one this does not know is still worth telling a listener."""

@@ -112,6 +112,30 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
     IPrep2Device(deck=deck, host="iprep2.local")
     self.assertEqual(deck.location, Coordinate(10.0, 20.0, 0.0))
 
+  async def test_a_device_round_trips_with_its_deck_and_labware(self) -> None:
+    """The serialized deck replaces the default one rather than standing beside it, and the
+    address comes back so the device can be set up again - the key does not."""
+    device = IPrep2Device(host="iprep2.local", port=4242, api_key="secret-token-xyz", secure=True)
+    device.deck.assign_child_at_zone(labware("source"), "Zone2")
+
+    serialized = device.serialize()
+    self.assertNotIn("secret-token-xyz", str(serialized))
+    loaded = IPrep2Device.deserialize(serialized)
+
+    self.assertEqual([child.name for child in loaded.children], ["deck"])
+    self.assertIs(loaded.deck, loaded.children[0])
+    held = loaded.deck.zones["Zone2"]
+    assert held is not None
+    self.assertEqual(held.name, "source")
+    self.assertIs(held.get_root(), loaded)
+    self.assertEqual((loaded.driver.host, loaded.driver.port), ("iprep2.local", 4242))
+    self.assertEqual(loaded.get_absolute_size_x(), device.get_absolute_size_x())
+
+  async def test_a_device_can_be_copied(self) -> None:
+    device = IPrep2Device(host="iprep2.local")
+    device.deck.assign_child_at_zone(labware(), "Zone1")
+    self.assertIsNotNone(device.copy().deck.zones["Zone1"])
+
   async def test_the_factory_builds_one_on_the_standard_deck(self) -> None:
     device = IPrep2(host="iprep2.local")
     self.assertEqual(len(device.deck.zone_names), 6)

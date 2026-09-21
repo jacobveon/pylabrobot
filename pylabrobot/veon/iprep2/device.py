@@ -1,7 +1,7 @@
 """The i.prep 2: the device, its driver, and the deck it carries."""
 
 import logging
-from typing import List, Optional
+from typing import Any, List, Mapping, Optional
 
 from pylabrobot.resources.coordinate import Coordinate
 from pylabrobot.resources.resource import Resource
@@ -38,11 +38,18 @@ class IPrep2Device(Resource):
     follow_events: bool = True,
     name: str = "i.prep 2",
     model: Optional[str] = None,
+    size_x: Optional[float] = None,
+    size_y: Optional[float] = None,
+    size_z: Optional[float] = None,
+    category: str = "device",
+    metadata: Optional[Mapping[str, Any]] = None,
   ):
     """
     Args:
       deck: the deck this instrument carries. Becomes a child of the device, so everything
-        assigned to it is a descendant of this device. Defaults to the standard deck.
+        assigned to it is a descendant of this device. Defaults to the standard deck. A
+        serialized device carries its deck as a child, and that one replaces this on
+        deserialization.
       driver: the driver to drive it through. Defaults to one built from the arguments below.
       host: the instrument's hostname or address, when building a driver.
       port: the port it serves on.
@@ -53,16 +60,26 @@ class IPrep2Device(Resource):
       model: which kind of resource this is, in PyLabRobot's terms. Not the instrument's own
         model string, which setup reads into `identity.model` and leaves there: one names a
         resource and the other names a machine, and a reader of either wants to know which.
+      size_x: how wide the device is, in mm. Defaults to the deck's own width.
+      size_y: how deep it is, in mm. Defaults to the deck's own depth.
+      size_z: how tall it is, in mm. Defaults to the deck's own height.
+      category: which kind of resource this is. Written by `serialize` and handed back by
+        `deserialize`, which is why it is taken here.
+      metadata: likewise, anything a caller attached to the device.
     """
     deck = deck if deck is not None else IPrep2Deck()
     super().__init__(
       name=name,
-      size_x=deck.get_absolute_size_x(),
-      size_y=deck.get_absolute_size_y(),
-      size_z=deck.get_absolute_size_z(),
-      category="device",
+      size_x=deck.get_absolute_size_x() if size_x is None else size_x,
+      size_y=deck.get_absolute_size_y() if size_y is None else size_y,
+      size_z=deck.get_absolute_size_z() if size_z is None else size_z,
+      category=category,
       model=model if model is not None else self.__class__.__name__,
+      metadata=metadata,
     )
+    # Kept so `serialize` can say how to reach the instrument again. The key is not: it is a
+    # credential, and serialized state is written to disk and passed around.
+    self._host, self._port, self._secure, self._follow_events = host, port, secure, follow_events
 
     self.deck = deck
     self.driver = (
@@ -136,7 +153,7 @@ class IPrep2Device(Resource):
       self._check_zones_match()
       self.deck.apply_calibration(await self.driver.request_zone_calibration())
     except BaseException:
-      await self.driver.stop()
+      await self.driver._stop_quietly()
       raise
     await self._report_deck_divergence()
 
@@ -204,6 +221,53 @@ class IPrep2Device(Resource):
       logger.warning(
         "the instrument's deck and this model disagree:\n  %s", "\n  ".join(differences)
       )
+
+  # ----------------------------------------
+  # Resource tree
+  # ----------------------------------------
+
+  def assign_child_resource(
+    self,
+    resource: Resource,
+    location: Optional[Coordinate] = None,
+    reassign: bool = True,
+  ) -> None:
+    """Assign a child to the device.
+
+    The device's one child is its deck, assigned in `__init__`. Deserialization then assigns the
+    serialized deck, which carries the labware; it replaces the one built by default rather than
+    standing beside it, and becomes `self.deck`.
+
+    Args:
+      resource: the child.
+      location: where it sits.
+      reassign: whether to replace a child of the same name.
+
+    Raises:
+      ValueError: If a child of the same name is already here and `reassign` is False.
+    """
+    existing = next((child for child in self.children if child.name == resource.name), None)
+    if existing is not None:
+      if not reassign:
+        raise ValueError(f"{resource.name!r} is already assigned to this device")
+      super().unassign_child_resource(existing)
+      if existing is self.deck and isinstance(resource, IPrep2Deck):
+        self.deck = resource
+    super().assign_child_resource(resource, location=location, reassign=reassign)
+
+  def serialize(self) -> dict:
+    """This device, with how to reach the instrument again - but not the key to it.
+
+    Returns:
+      The serialized device.
+    """
+    return {
+      **super().serialize(),
+      "host": self._host,
+      "port": self._port,
+      "secure": self._secure,
+      "follow_events": self._follow_events,
+    }
 
   def __str__(self) -> str:
     identity = self.driver._identity

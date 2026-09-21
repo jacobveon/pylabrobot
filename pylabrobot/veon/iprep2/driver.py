@@ -46,6 +46,12 @@ DEFAULT_PORT = 11011
 # reported from one PyLabRobot raised itself.
 EVENT_PREFIX = "iprep2"
 
+# How long to wait for one event before checking the stream is still there. Not a fault when it
+# passes: an instrument with nothing to say is not broken, so the follower goes round again. The
+# instrument does send an `uptime_tick` every 10 s, so on a live link this never actually elapses,
+# but nothing here depends on that.
+EVENT_READ_TIMEOUT = 60.0
+
 
 class IPrep2Driver:
   """Drives an i.prep 2 over its HTTP API and event stream.
@@ -312,7 +318,8 @@ class IPrep2Driver:
     Repeatable: a second call re-reads the instrument and reopens the stream.
 
     Raises:
-      IPrep2Error: If the instrument would not say what it is.
+      IPrep2Error: If the instrument would not say what it is. Whatever was opened is closed
+        again first.
     """
     logger.warning(
       "The PyLabRobot i.prep 2 integration has not been checked against physical hardware. "
@@ -332,7 +339,7 @@ class IPrep2Driver:
       if self._follow_events:
         await self._start_following_events()
     except BaseException:
-      await self.stop()
+      await self._stop_quietly()
       raise
 
     for line in describe(self._identity, self._capabilities):
@@ -358,6 +365,17 @@ class IPrep2Driver:
     if self._connected:
       await self.io.stop()
       self._connected = False
+
+  async def _stop_quietly(self) -> None:
+    """Stop, without letting a failure in stopping hide what went wrong before it.
+
+    For the error paths of `setup`: what the caller needs is why setup failed, and a socket that
+    would not close on the way out is a footnote to that, not a replacement for it.
+    """
+    try:
+      await self.stop()
+    except Exception as exc:
+      logger.warning("could not close the connections after a failed setup: %r", exc)
 
   # ----------------------------------------
   # The event stream
@@ -395,9 +413,15 @@ class IPrep2Driver:
     """
     try:
       while True:
-        # No timeout: an instrument with nothing to say is not a fault, and a stream that ends
-        # raises rather than going quiet.
-        raw = await self.events_io.read(timeout=None)
+        # A quiet spell is not a fault, so the wait is bounded and then simply resumed. It is not
+        # unbounded: `None` would mean the transport's own default, which is 30 s and would end
+        # the follower on the first quiet half-minute - and a stream that has actually ended
+        # raises ConnectionError, which is what the clause below is for.
+        try:
+          raw = await self.events_io.read(timeout=EVENT_READ_TIMEOUT)
+        except TimeoutError:
+          logger.debug("no event from the i.prep 2 in %.0f s; still listening", EVENT_READ_TIMEOUT)
+          continue
         self._emit(raw)
     except asyncio.CancelledError:
       raise

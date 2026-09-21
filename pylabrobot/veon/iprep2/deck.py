@@ -35,9 +35,18 @@ from pylabrobot.utils.linalg import matrix_vector_multiply_3x3
 DECK_ID = "iprep2-standard-deck"
 DECK_DEFINITION_VERSION = "1.0.0"
 
-SIZE_X = 350.0
-SIZE_Y = 350.0
-# How far the deck surface stands above the deck resource's own origin.
+# The footprint. Provisional: these enclose the zones below, which the instrument's own
+# `dimensions_mm` (350 x 350) do not - Zone3 and Zone6 would run 13 mm past its right edge - and
+# the figures from the CAD model will replace them. Zones 4-6 still start 4.4 mm in front of
+# y = 0, which says the instrument's origin is not quite the deck's front edge; that too waits on
+# the drawing.
+SIZE_X = 365.0
+SIZE_Y = 280.0
+# The instrument's Z reading with a channel touching the deck surface. Its Z frame starts at the
+# channel's home position and grows as the channel comes down, so this is the head's full travel
+# to the deck - the height of the working volume above the surface - and not the thickness of any
+# part. The deck resource spans that volume: its origin plane is the surface the zones sit on,
+# and its top is where the channels rest at home.
 SIZE_Z = 217.172
 
 # The height that is clear to travel at, in mm above the deck surface.

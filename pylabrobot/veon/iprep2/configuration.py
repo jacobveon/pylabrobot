@@ -187,7 +187,7 @@ class Capabilities:
         travel={
           axis: AxisTravel(minimum=bounds["min_mm"], maximum=bounds["max_mm"])
           for axis, bounds in (motion.get("travel") or {}).items()
-          if "min_mm" in bounds and "max_mm" in bounds
+          if isinstance(bounds, dict) and "min_mm" in bounds and "max_mm" in bounds
         },
       ),
       deck=DeckCapabilities(
@@ -256,7 +256,8 @@ class Readiness:
     busy: whether an operation holds the instrument.
     owner: what holds it, on an instrument that is busy.
     request_id: which request holds it.
-    at_home: whether every axis is at its home position.
+    at_home: whether every axis is at its home position. None when the instrument did not say,
+      which is not the same as saying no.
     axes_away_from_home: the axes that are not, named as the instrument names them.
     tips_attached: the channels carrying a tip, as the instrument numbers them.
   """
@@ -264,7 +265,7 @@ class Readiness:
   busy: bool
   owner: Optional[str] = None
   request_id: Optional[str] = None
-  at_home: bool = False
+  at_home: Optional[bool] = None
   axes_away_from_home: Tuple[str, ...] = ()
   tips_attached: Tuple[int, ...] = ()
 
@@ -276,10 +277,15 @@ class Readiness:
     operation starts from somewhere no protocol chose, so it is worth knowing before commanding
     one.
 
+    An instrument that did not say whether it is home is not called dirty for it: only what it
+    did say - tips on, axes named as away, or `at_home` reported false - counts.
+
     Returns:
       Whether it is free with tips on or an axis away from home.
     """
-    return not self.busy and (bool(self.tips_attached) or not self.at_home)
+    return not self.busy and (
+      bool(self.tips_attached) or bool(self.axes_away_from_home) or self.at_home is False
+    )
 
   @classmethod
   def from_response(cls, data: Dict[str, Any]) -> "Readiness":
@@ -295,7 +301,7 @@ class Readiness:
       busy=bool(data.get("busy", False)),
       owner=data.get("owner"),
       request_id=data.get("request_id"),
-      at_home=bool(data.get("at_home", False)),
+      at_home=None if data.get("at_home") is None else bool(data["at_home"]),
       axes_away_from_home=tuple(data.get("axes_away_from_home") or ()),
       tips_attached=tuple(data.get("tips_attached") or ()),
     )

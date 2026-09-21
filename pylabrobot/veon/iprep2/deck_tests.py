@@ -5,6 +5,8 @@ import unittest
 from pylabrobot.resources.coordinate import Coordinate
 from pylabrobot.resources.resource import Resource
 from pylabrobot.veon.iprep2.deck import (
+  SIZE_X,
+  SIZE_Y,
   ZONE_NAMES,
   ZONE_SIZE_X,
   ZONE_SIZE_Y,
@@ -67,6 +69,16 @@ class DeckGeometryTests(unittest.TestCase):
     heights = {zone: zone_at(self.deck, zone).z for zone in self.deck.zone_names}
     self.assertEqual(max(heights.values()), 0.0)
     self.assertAlmostEqual(min(heights.values()), -0.345, places=3)
+
+  def test_every_zone_lies_within_the_decks_far_edges(self) -> None:
+    """The footprint has to enclose the zones, or the visualizer draws plates off the deck. The
+    front edge is not checked: Zones 4-6 start 4.4 mm before y = 0, which waits on the CAD
+    figures rather than on a number here."""
+    for zone in self.deck.zone_names:
+      at = zone_at(self.deck, zone)
+      self.assertLessEqual(at.x + ZONE_SIZE_X, SIZE_X, zone)
+      self.assertLessEqual(at.y + ZONE_SIZE_Y, SIZE_Y, zone)
+      self.assertGreaterEqual(at.x, 0.0, zone)
 
   def test_every_zone_takes_the_same_footprint(self) -> None:
     """An SBS plate stood on its long edge, which is how this deck takes one."""

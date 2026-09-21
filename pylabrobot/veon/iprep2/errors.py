@@ -172,8 +172,13 @@ def error_from_envelope(http_status: int, envelope: Dict[str, Any]) -> IPrep2Err
 
   error_code = str(payload.get("error_code") or "")
   domain = str(payload.get("domain") or "")
+  # A body that is not an envelope may still say something: the instrument's own 404 for an
+  # unknown path is `{"error": "Not Found"}`, which is worth more than a stock phrase.
   message = str(
-    payload.get("message") or envelope.get("message") or "the instrument reported an error"
+    payload.get("message")
+    or envelope.get("message")
+    or envelope.get("error")
+    or "the instrument reported an error"
   )
 
   family = error_code.split(".", 1)[0]

@@ -96,9 +96,9 @@ class CapabilitiesTests(unittest.TestCase):
     self.assertEqual(Capabilities.from_response(grown).pipette.num_channels, 8)
 
   def test_an_axis_without_a_range_is_left_out(self) -> None:
-    """Half a range describes nothing."""
+    """Half a range describes nothing, and `null` describes less; neither is a reason to fail."""
     partial = dict(CAPABILITIES)
-    partial["motion"] = {"axes": ["x", "y"], "travel": {"x": {"min_mm": 0.0}}}
+    partial["motion"] = {"axes": ["x", "y"], "travel": {"x": {"min_mm": 0.0}, "y": None}}
     self.assertEqual(Capabilities.from_response(partial).motion.travel, {})
 
 
@@ -135,6 +135,16 @@ class ReadinessTests(unittest.TestCase):
     )
     self.assertTrue(ready.left_dirty)
     self.assertEqual(ready.tips_attached, (1, 2))
+
+  def test_an_instrument_that_did_not_say_whether_it_is_home_is_not_called_dirty(self) -> None:
+    """Not saying is not the same as saying no; only what was reported counts."""
+    ready = Readiness.from_response({"busy": False, "tips_attached": []})
+    self.assertIsNone(ready.at_home)
+    self.assertFalse(ready.left_dirty)
+    self.assertTrue(Readiness.from_response({"busy": False, "at_home": False}).left_dirty)
+    self.assertTrue(
+      Readiness.from_response({"busy": False, "axes_away_from_home": ["x"]}).left_dirty
+    )
 
   def test_a_busy_instrument_is_not_reported_dirty(self) -> None:
     """Something holds it, which is the more useful thing to say."""

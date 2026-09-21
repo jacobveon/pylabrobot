@@ -55,6 +55,12 @@ class ErrorFromEnvelopeTests(unittest.TestCase):
     self.assertEqual(raised.http_status, 502)
     self.assertIn("Bad Gateway", str(raised))
 
+  def test_the_instruments_own_404_keeps_its_text(self) -> None:
+    """An unknown path is answered `{"error": "Not Found"}` - not an envelope, but it says
+    something, and that beats a stock phrase. Read off a real instrument."""
+    raised = error_from_envelope(404, {"error": "Not Found"})
+    self.assertIn("Not Found", str(raised))
+
   def test_a_body_that_is_not_an_envelope_is_still_raised(self) -> None:
     """Rather than failing to parse, which would replace the failure with a second one."""
     raised = error_from_envelope(500, {"data": "not an object"})
