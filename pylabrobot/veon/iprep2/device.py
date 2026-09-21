@@ -77,10 +77,6 @@ class IPrep2Device(Resource):
       model=model if model is not None else self.__class__.__name__,
       metadata=metadata,
     )
-    # Kept so `serialize` can say how to reach the instrument again. The key is not: it is a
-    # credential, and serialized state is written to disk and passed around.
-    self._host, self._port, self._secure, self._follow_events = host, port, secure, follow_events
-
     self.deck = deck
     self.driver = (
       driver
@@ -207,16 +203,12 @@ class IPrep2Device(Resource):
       return
 
     differences: List[str] = []
-    for zone in self.deck.zone_names:
+    for zone, held in self.deck.zones.items():
       on_instrument = bool(state.get(zone))
-      in_model = self.deck.zones.get(zone) is not None
-      if on_instrument and not in_model:
+      if on_instrument and held is None:
         differences.append(f"{zone}: the instrument holds labware, this model does not")
-      elif in_model and not on_instrument:
-        held = self.deck.zones[zone]
-        differences.append(
-          f"{zone}: this model holds {held.name if held else 'labware'}, the instrument does not"
-        )
+      elif held is not None and not on_instrument:
+        differences.append(f"{zone}: this model holds {held.name}, the instrument does not")
     if differences:
       logger.warning(
         "the instrument's deck and this model disagree:\n  %s", "\n  ".join(differences)
@@ -244,29 +236,43 @@ class IPrep2Device(Resource):
       reassign: whether to replace a child of the same name.
 
     Raises:
-      ValueError: If a child of the same name is already here and `reassign` is False.
+      ValueError: If a child of the same name is already here and `reassign` is False, or if
+        what would replace the deck is not an `IPrep2Deck`. The device carries one deck and
+        answers for it, so it cannot be swapped for something that does not behave as one.
     """
     existing = next((child for child in self.children if child.name == resource.name), None)
     if existing is not None:
       if not reassign:
         raise ValueError(f"{resource.name!r} is already assigned to this device")
-      super().unassign_child_resource(existing)
-      if existing is self.deck and isinstance(resource, IPrep2Deck):
+      if existing is self.deck:
+        if not isinstance(resource, IPrep2Deck):
+          raise ValueError(
+            f"{resource.name!r} is named like this device's deck but is not an IPrep2Deck, and "
+            f"the device carries one deck and answers for it"
+          )
+        super().unassign_child_resource(existing)
         self.deck = resource
+      else:
+        super().unassign_child_resource(existing)
     super().assign_child_resource(resource, location=location, reassign=reassign)
 
   def serialize(self) -> dict:
     """This device, with how to reach the instrument again - but not the key to it.
+
+    The address is the driver's, not what this constructor was given: a caller that handed over
+    a ready-built driver never gave the constructor an address at all, and what has to come back
+    is the instrument the device actually talks to. The key does not come back: it is a
+    credential, and serialized state is written to disk and passed around.
 
     Returns:
       The serialized device.
     """
     return {
       **super().serialize(),
-      "host": self._host,
-      "port": self._port,
-      "secure": self._secure,
-      "follow_events": self._follow_events,
+      "host": self.driver.host,
+      "port": self.driver.port,
+      "secure": self.driver.secure,
+      "follow_events": self.driver.follow_events,
     }
 
   def __str__(self) -> str:

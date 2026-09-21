@@ -2,7 +2,7 @@
 
 import logging
 import unittest
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from pylabrobot.io.http import HTTPError
 from pylabrobot.resources.coordinate import Coordinate
@@ -11,24 +11,13 @@ from pylabrobot.veon.iprep2.deck import IPrep2Deck
 from pylabrobot.veon.iprep2.deck_tests import labware, zone_at
 from pylabrobot.veon.iprep2.device import IPrep2, IPrep2Device
 from pylabrobot.veon.iprep2.driver import IPrep2Driver
-from pylabrobot.veon.iprep2.driver_tests import _FakeEvents, _FakeHTTP
+from pylabrobot.veon.iprep2.driver_tests import _FakeEvents, _FakeHTTP, _WarningCatcher
 from pylabrobot.veon.iprep2.errors import IPrep2Error
 
 EMPTY_DECK: Dict[str, Any] = {zone: {} for zone in CAPABILITIES["deck"]["zones"]}
 NO_CALIBRATION: Dict[str, Any] = {
   "zones": {zone: {"x": 0.0, "y": 0.0, "z": 0.0} for zone in EMPTY_DECK}
 }
-
-
-class _WarningCatcher(logging.Handler):
-  """Keeps every record it is given, so a test can assert there were none."""
-
-  def __init__(self) -> None:
-    super().__init__(level=logging.WARNING)
-    self.records: List[logging.LogRecord] = []
-
-  def emit(self, record: logging.LogRecord) -> None:
-    self.records.append(record)
 
 
 class _DeviceTestCase(unittest.IsolatedAsyncioTestCase):
@@ -119,6 +108,32 @@ class DeviceTests(_DeviceTestCase):
     self.assertEqual((loaded.driver.host, loaded.driver.port), ("iprep2.local", 4242))
     self.assertEqual(loaded.get_absolute_size_x(), device.get_absolute_size_x())
 
+  async def test_serialize_describes_the_driver_it_was_handed(self) -> None:
+    """A caller that passed a ready-built driver never gave the constructor an address, and
+    what has to come back is the instrument the device actually talks to."""
+    driver = IPrep2Driver(host="bench.local", port=5000, secure=True, follow_events=False)
+    serialized = IPrep2Device(driver=driver).serialize()
+    self.assertEqual(
+      (serialized["host"], serialized["port"], serialized["secure"], serialized["follow_events"]),
+      ("bench.local", 5000, True, False),
+    )
+    loaded = IPrep2Device.deserialize(serialized)
+    self.assertEqual((loaded.driver.host, loaded.driver.port), ("bench.local", 5000))
+    self.assertTrue(loaded.driver.secure)
+    self.assertFalse(loaded.driver.follow_events)
+
+  async def test_the_deck_cannot_be_replaced_by_something_that_is_not_one(self) -> None:
+    """A resource merely named like the deck would otherwise take its place in the tree while
+    `device.deck` went on pointing at one nothing carried."""
+    device = IPrep2Device(host="iprep2.local")
+    deck = device.deck
+    with self.assertRaises(ValueError) as caught:
+      device.assign_child_resource(labware("deck"), location=Coordinate(0, 0, 0))
+    self.assertIn("IPrep2Deck", str(caught.exception))
+    self.assertIs(device.deck, deck)
+    self.assertIs(deck.parent, device)
+    self.assertEqual([child.name for child in device.children], ["deck"])
+
   async def test_a_device_can_be_copied(self) -> None:
     device = IPrep2Device(host="iprep2.local")
     device.deck.assign_child_at_zone(labware(), "Zone1")
@@ -175,6 +190,17 @@ class DivergenceTests(_DeviceTestCase):
     with self.assertLogs("pylabrobot.veon.iprep2.device", level="WARNING"):
       await device.setup()
     self.assertIsNone(device.deck.zones["Zone2"])
+
+  async def test_both_directions_of_disagreement_are_reported_together(self) -> None:
+    """One warning with one line per zone, whichever side holds the labware."""
+    deck = IPrep2Deck()
+    deck.assign_child_at_zone(labware("source"), "Zone3")
+    loaded = dict(EMPTY_DECK, Zone2={"labwareId": "rack-96"})
+    with self.assertLogs("pylabrobot.veon.iprep2.device", level="WARNING") as logs:
+      await self._device({"/deck/state": loaded}, deck=deck).setup()
+    (message,) = [m for m in logs.output if "disagree" in m]
+    self.assertIn("Zone2: the instrument holds labware, this model does not", message)
+    self.assertIn("Zone3: this model holds source, the instrument does not", message)
 
   async def test_a_zone_the_instrument_does_not_report_is_called_out(self) -> None:
     """Commands about it would be refused, so it is said out loud rather than found out later."""

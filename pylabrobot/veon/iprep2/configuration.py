@@ -176,10 +176,13 @@ class Capabilities:
         max_volume=pipette.get("max_volume_ul"),
         max_rate=pipette.get("max_rate_ul_per_s"),
         tip_capacities=tuple(pipette.get("tip_capacities_ul") or ()),
-        # The instrument keys this by channel as a string, JSON having no integer keys.
+        # The instrument keys this by channel as a string, JSON having no integer keys. An entry
+        # that is not a list of sizes under a channel number - `null` for a channel with no tips
+        # configured, say - is left out the way an axis without a range is, not tripped over.
         tip_capacities_by_channel={
           int(channel): tuple(capacities)
           for channel, capacities in (pipette.get("tip_capacities_by_channel") or {}).items()
+          if str(channel).isdigit() and isinstance(capacities, (list, tuple))
         },
       ),
       motion=MotionCapabilities(
@@ -286,6 +289,24 @@ class Readiness:
     return not self.busy and (
       bool(self.tips_attached) or bool(self.axes_away_from_home) or self.at_home is False
     )
+
+  def how_left(self) -> List[str]:
+    """What was left undone, one phrase per signal the instrument actually reported.
+
+    Built from what is present rather than from a fixed sentence, so an instrument that said only
+    `at_home: false` is not described as having tips on an empty list of channels.
+
+    Returns:
+      The phrases, empty for an instrument that was put away or did not say.
+    """
+    signals: List[str] = []
+    if self.tips_attached:
+      signals.append(f"tips on channels {list(self.tips_attached)}")
+    if self.axes_away_from_home:
+      signals.append(f"axes away from home: {list(self.axes_away_from_home)}")
+    elif self.at_home is False:
+      signals.append("not at home")
+    return signals
 
   @classmethod
   def from_response(cls, data: Dict[str, Any]) -> "Readiness":

@@ -12,6 +12,11 @@ Two rules come from the instrument's own error reference and shape everything he
    know becomes its family's exception, and a family it does not know becomes `IPrep2Error`. What
    arrives is always raised as something a caller can catch.
 
+Alongside the code the instrument sends `inherits`: the code's ancestors, most specific first, so
+that a whole family can be handled without matching every leaf. The reference says to prefer
+matching one of those to matching every leaf, and the class chosen here follows the same lineage -
+a leaf this module has never heard of that inherits `INSTRUMENT.BUSY` is still a busy error.
+
 There is deliberately no "retriable" flag, because the instrument does not have one: whether
 retrying is safe depends on what else is on the deck, which is PyLabRobot's question rather than
 the instrument's. A tip lost during pickup is the clearest case - the instrument knows the tip is
@@ -19,7 +24,7 @@ not on the channel, and cannot know where it fell.
 """
 
 import logging
-from typing import Any, Dict, Optional, Type
+from typing import Any, Dict, Optional, Tuple, Type
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +36,8 @@ class IPrep2Error(Exception):
     error_code: the instrument's dotted code, e.g. `"MOTION.STALLED"`. Empty when the instrument
       answered an error without one, which an older firmware may.
     domain: the family the code belongs to, as the instrument named it.
+    inherits: the code's ancestors, most specific first, as the instrument listed them. Match one
+      of these with `is_a` to handle a whole family without naming every leaf.
     http_status: the status the request was answered with.
     message: what the instrument said, for a person. Do not branch on it.
     payload: the whole `data` object, including fields specific to this code - `channel`,
@@ -45,6 +52,7 @@ class IPrep2Error(Exception):
     http_status: int,
     message: str,
     payload: Dict[str, Any],
+    inherits: Tuple[str, ...] = (),
   ):
     """
     Args:
@@ -53,13 +61,26 @@ class IPrep2Error(Exception):
       http_status: the status the request was answered with.
       message: what the instrument said.
       payload: the whole `data` object from the envelope.
+      inherits: the code's ancestors, most specific first.
     """
     self.error_code = error_code
     self.domain = domain
     self.http_status = http_status
     self.message = message
     self.payload = payload
+    self.inherits = inherits
     super().__init__(f"{error_code or f'HTTP {http_status}'}: {message}")
+
+  def is_a(self, code: str) -> bool:
+    """Whether this error is the given code, or descends from it.
+
+    Args:
+      code: an error code, e.g. `"INSTRUMENT.BUSY"`.
+
+    Returns:
+      Whether the code is this error's own or one of its ancestors.
+    """
+    return self.error_code == code or code in self.inherits
 
   @property
   def channel(self) -> Optional[int]:
@@ -167,6 +188,29 @@ _CODES: Dict[str, Type[IPrep2Error]] = {
 }
 
 
+def _class_for(lineage: Tuple[str, ...]) -> Type[IPrep2Error]:
+  """The most specific class any code in a lineage names.
+
+  A named code anywhere in the lineage beats a family anywhere in it, since the named codes are
+  the ones a caller handles differently from the rest of their family - a leaf that inherits
+  `INSTRUMENT.BUSY` is something to wait out, whatever its own family is called.
+
+  Args:
+    lineage: the error's own code first, then its ancestors, most specific first.
+
+  Returns:
+    The class, `IPrep2Error` when nothing in the lineage is known.
+  """
+  for code in lineage:
+    if code in _CODES:
+      return _CODES[code]
+  for code in lineage:
+    family = code.split(".", 1)[0]
+    if family in _FAMILIES:
+      return _FAMILIES[family]
+  return IPrep2Error
+
+
 def error_from_envelope(http_status: int, envelope: Dict[str, Any]) -> IPrep2Error:
   """Build the exception for an error the instrument answered with.
 
@@ -186,6 +230,12 @@ def error_from_envelope(http_status: int, envelope: Dict[str, Any]) -> IPrep2Err
 
   error_code = str(payload.get("error_code") or "")
   domain = str(payload.get("domain") or "")
+  reported_inherits = payload.get("inherits")
+  inherits = tuple(
+    code
+    for code in (reported_inherits if isinstance(reported_inherits, list) else ())
+    if isinstance(code, str)
+  )
   # A body that is not an envelope may still say something: the instrument's own 404 for an
   # unknown path is `{"error": "Not Found"}`, which is worth more than a stock phrase.
   message = str(
@@ -195,18 +245,22 @@ def error_from_envelope(http_status: int, envelope: Dict[str, Any]) -> IPrep2Err
     or "the instrument reported an error"
   )
 
-  family = error_code.split(".", 1)[0]
-  if family and family not in _FAMILIES:
-    # Worth saying once: a family that is not here is handled, but less precisely than it could
-    # be, and the fix is to add it.
+  lineage = (error_code, *inherits) if error_code else inherits
+  cls = _class_for(lineage)
+  if cls is IPrep2Error and error_code:
+    # Worth saying: a lineage with nothing known in it is handled, but less precisely than it
+    # could be, and the fix is to add the family.
     logger.debug(
-      "unknown i.prep 2 error family %r in %r; raising it as IPrep2Error", family, error_code
+      "no known i.prep 2 error family in %r (inherits %r); raising it as IPrep2Error",
+      error_code,
+      list(inherits),
     )
 
-  return _CODES.get(error_code, _FAMILIES.get(family, IPrep2Error))(
+  return cls(
     error_code=error_code,
     domain=domain,
     http_status=http_status,
     message=message,
     payload=payload,
+    inherits=inherits,
   )

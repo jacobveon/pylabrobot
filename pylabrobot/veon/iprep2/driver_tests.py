@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import unittest
 from typing import Any, Dict, List, Optional, Union
 
@@ -9,7 +10,7 @@ from pylabrobot.events import EventBus, PLREvent, use_event_bus
 from pylabrobot.io.http import HTTP, HTTPError
 from pylabrobot.io.websocket import WebSocket
 from pylabrobot.veon.iprep2.configuration_tests import CAPABILITIES, INFO
-from pylabrobot.veon.iprep2.driver import IPrep2Driver
+from pylabrobot.veon.iprep2.driver import IPrep2Driver, _warn_unverified
 from pylabrobot.veon.iprep2.errors import (
   IPrep2BusyError,
   IPrep2Error,
@@ -25,6 +26,25 @@ READINESS: Dict[str, Any] = {
   "axes_away_from_home": [],
   "tips_attached": [],
 }
+
+
+class _WarningCatcher(logging.Handler):
+  """Keeps every warning it is given, so a test can read them all or assert there were none.
+
+  `assertLogs` fails when nothing is logged and `assertNoLogs` arrived in Python 3.10, which this
+  package does not require; a handler that keeps records answers both questions.
+  """
+
+  def __init__(self) -> None:
+    super().__init__(level=logging.WARNING)
+    self.records: List[logging.LogRecord] = []
+
+  def emit(self, record: logging.LogRecord) -> None:
+    self.records.append(record)
+
+  @property
+  def messages(self) -> List[str]:
+    return [record.getMessage() for record in self.records]
 
 
 class _FakeHTTP(HTTP):
@@ -182,6 +202,35 @@ class DriverSetupTests(unittest.IsolatedAsyncioTestCase):
     with self.assertLogs("pylabrobot.veon.iprep2.driver", level="WARNING"):
       with self.assertRaises(IPrep2Error):
         await driver.setup()
+
+  async def test_an_instrument_left_unhomed_is_described_as_that(self) -> None:
+    """Not as having tips on an empty list of channels: the warning names what was reported."""
+    unhomed = dict(READINESS, at_home=False)
+    captured = _WarningCatcher()
+    logging.getLogger("pylabrobot.veon.iprep2.driver").addHandler(captured)
+    try:
+      await self._driver(http=_FakeHTTP({"/system/readiness": unhomed}))
+    finally:
+      logging.getLogger("pylabrobot.veon.iprep2.driver").removeHandler(captured)
+    (message,) = [m for m in captured.messages if "not put away" in m]
+    self.assertIn("not at home", message)
+    self.assertNotIn("[]", message)
+
+  async def test_the_unverified_warning_is_accurate_and_said_once(self) -> None:
+    """It says what was checked - read-only, against real instruments - rather than that nothing
+    was, and a second setup does not repeat it: a warning on every reconnect gets filtered
+    wholesale, taking the ones that matter with it."""
+    _warn_unverified.cache_clear()
+    captured = _WarningCatcher()
+    logging.getLogger("pylabrobot.veon.iprep2.driver").addHandler(captured)
+    try:
+      driver = await self._driver()
+      await driver.setup()
+    finally:
+      logging.getLogger("pylabrobot.veon.iprep2.driver").removeHandler(captured)
+    (message,) = [m for m in captured.messages if "1218" in m]
+    self.assertIn("read-only against real instruments", message)
+    self.assertNotIn("not been checked", message)
 
   async def test_the_event_stream_can_be_left_closed(self) -> None:
     """For a caller that only wants to command the instrument."""

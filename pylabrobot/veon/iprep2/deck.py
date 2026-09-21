@@ -17,7 +17,7 @@ Nothing here carries the instrument's frame: zone heights below are PyLabRobot's
 between the two is the driver's business at the point a move is commanded.
 """
 
-from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from pylabrobot.resources.coordinate import Coordinate
 from pylabrobot.resources.deck import Deck
@@ -368,8 +368,15 @@ class IPrep2Deck(Deck):
       reassign: whether to replace a holder of the same name.
 
     Raises:
-      ValueError: If something other than a zone holder is assigned directly to the deck.
+      ValueError: If something other than a zone holder is assigned directly to the deck, whether
+        or not it wears a zone holder's name. A zone that had been swapped for a plate would
+        still be answered for as a zone, and fail the first time it was asked what it holds.
     """
+    if not isinstance(resource, ResourceHolder):
+      raise ValueError(
+        f"cannot assign {resource.name!r} straight to the deck: labware goes in a zone, with "
+        f"assign_child_at_zone(resource, 'Zone1')"
+      )
     existing = next((child for child in self.children if child.name == resource.name), None)
     if existing is not None:
       if not reassign:
@@ -377,13 +384,8 @@ class IPrep2Deck(Deck):
       super().unassign_child_resource(existing)
       for zone, holder in self._zone_holders.items():
         if holder is existing:
-          self._zone_holders[zone] = cast(ResourceHolder, resource)
+          self._zone_holders[zone] = resource
           break
-    elif not isinstance(resource, ResourceHolder):
-      raise ValueError(
-        f"cannot assign {resource.name!r} straight to the deck: labware goes in a zone, with "
-        f"assign_child_at_zone(resource, 'Zone1')"
-      )
     super().assign_child_resource(resource, location=location, reassign=reassign)
 
   def serialize(self) -> dict:

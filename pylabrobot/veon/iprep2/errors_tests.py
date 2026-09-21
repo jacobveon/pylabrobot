@@ -56,6 +56,49 @@ class ErrorFromEnvelopeTests(unittest.TestCase):
         self.assertIsInstance(raised, IPrep2InstrumentError)
         self.assertNotIsInstance(raised, IPrep2BusyError)
 
+  def test_a_leaf_that_inherits_busy_is_busy(self) -> None:
+    """The instrument lists a code's ancestors, most specific first, and says to prefer matching
+    one of those to matching every leaf. A code this module has never heard of that descends from
+    `INSTRUMENT.BUSY` is still something to wait out."""
+    raised = error_from_envelope(
+      409,
+      envelope(
+        error_code="RUN.WAITING_FOR_INSTRUMENT",
+        inherits=["INSTRUMENT.BUSY", "INSTRUMENT.FAILURE"],
+      ),
+    )
+    self.assertIsInstance(raised, IPrep2BusyError)
+    self.assertEqual(raised.inherits, ("INSTRUMENT.BUSY", "INSTRUMENT.FAILURE"))
+    self.assertTrue(raised.is_a("INSTRUMENT.BUSY"))
+    self.assertTrue(raised.is_a("RUN.WAITING_FOR_INSTRUMENT"))
+    self.assertFalse(raised.is_a("MOTION.STALLED"))
+
+  def test_a_codes_own_family_beats_an_ancestors_family(self) -> None:
+    """`TIP.MISSING_AT_SOURCE` inheriting `CHANNEL.FAILURE` is a tip error first, as the
+    instrument's own example has it."""
+    raised = error_from_envelope(
+      422,
+      envelope(
+        error_code="TIP.MISSING_AT_SOURCE", inherits=["TIP.PICKUP_FAILED", "CHANNEL.FAILURE"]
+      ),
+    )
+    self.assertIsInstance(raised, IPrep2TipError)
+
+  def test_an_unknown_family_falls_back_to_an_ancestors_family(self) -> None:
+    """A family this does not know, descending from one it does, is raised as the known one
+    rather than as the bare base."""
+    raised = error_from_envelope(
+      500, envelope(error_code="GRIPPER.JAMMED", inherits=["MOTION.STALLED"])
+    )
+    self.assertIsInstance(raised, IPrep2MotionError)
+
+  def test_a_malformed_inherits_is_ignored(self) -> None:
+    """Tolerance covers this field too: a body that is not a list of codes still produces the
+    code's own family, with nothing inherited."""
+    raised = error_from_envelope(400, envelope(error_code="VALIDATION.X", inherits="not-a-list"))
+    self.assertIsInstance(raised, IPrep2ValidationError)
+    self.assertEqual(raised.inherits, ())
+
   def test_an_unknown_family_is_still_raised(self) -> None:
     """New codes are added, and one this does not know is still a failure the caller has to see."""
     raised = error_from_envelope(500, envelope(error_code="GRIPPER.JAMMED", message="stuck"))

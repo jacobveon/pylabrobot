@@ -95,6 +95,18 @@ class CapabilitiesTests(unittest.TestCase):
     grown["pipette"] = dict(CAPABILITIES["pipette"], future_field=1)
     self.assertEqual(Capabilities.from_response(grown).pipette.num_channels, 8)
 
+  def test_a_channel_without_tip_capacities_is_left_out(self) -> None:
+    """`null` for a channel with no tips configured, or a key that is not a channel number, is
+    left out the way an axis without a range is - not tripped over at setup."""
+    partial = dict(CAPABILITIES)
+    partial["pipette"] = dict(
+      CAPABILITIES["pipette"],
+      tip_capacities_by_channel={"1": [50.0, 200.0], "2": None, "spare": [1000.0]},
+    )
+    self.assertEqual(
+      Capabilities.from_response(partial).pipette.tip_capacities_by_channel, {1: (50.0, 200.0)}
+    )
+
   def test_an_axis_without_a_range_is_left_out(self) -> None:
     """Half a range describes nothing, and `null` describes less; neither is a reason to fail."""
     partial = dict(CAPABILITIES)
@@ -145,6 +157,22 @@ class ReadinessTests(unittest.TestCase):
     self.assertTrue(
       Readiness.from_response({"busy": False, "axes_away_from_home": ["x"]}).left_dirty
     )
+
+  def test_how_it_was_left_names_only_what_was_reported(self) -> None:
+    """An instrument that said only `at_home: false` is not described as having tips on an
+    empty list of channels."""
+    only_unhomed = Readiness.from_response(
+      {"busy": False, "at_home": False, "axes_away_from_home": [], "tips_attached": []}
+    )
+    self.assertEqual(only_unhomed.how_left(), ["not at home"])
+
+    with_everything = Readiness.from_response(
+      {"busy": False, "at_home": False, "axes_away_from_home": ["x", "z1"], "tips_attached": [1]}
+    )
+    self.assertEqual(
+      with_everything.how_left(), ["tips on channels [1]", "axes away from home: ['x', 'z1']"]
+    )
+    self.assertEqual(Readiness.from_response({"busy": False, "at_home": True}).how_left(), [])
 
   def test_a_busy_instrument_is_not_reported_dirty(self) -> None:
     """Something holds it, which is the more useful thing to say."""

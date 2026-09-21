@@ -11,6 +11,7 @@ from pylabrobot.veon.iprep2.deck import (
   ZONE_SIZE_X,
   ZONE_SIZE_Y,
   IPrep2Deck,
+  _footprint,
 )
 
 
@@ -156,6 +157,20 @@ class FitTests(unittest.TestCase):
     with self.assertRaises(ValueError):
       IPrep2Deck().assign_child_at_zone(landscape, "Zone2")
 
+  def test_the_footprint_is_the_resources_own_rotation_and_nothing_above_it(self) -> None:
+    """Turned by the resource's own rotation only: under a turned carrier the absolute size
+    swaps, the footprint does not."""
+    landscape = Resource(name="plate", size_x=127.76, size_y=85.48, size_z=14.35)
+    width, depth = _footprint(landscape.rotated(z=90))
+    self.assertAlmostEqual(width, 85.48, places=6)
+    self.assertAlmostEqual(depth, 127.76, places=6)
+
+    carrier = Resource(name="carrier", size_x=300.0, size_y=300.0, size_z=1.0)
+    carrier.rotate(z=90)
+    carrier.assign_child_resource(landscape, location=Coordinate(0, 0, 0))
+    self.assertAlmostEqual(landscape.get_absolute_size_x(), 85.48, places=6)
+    self.assertEqual(_footprint(landscape), (127.76, 85.48))
+
   def test_a_refused_plate_leaves_the_zone_empty(self) -> None:
     """Rather than half-assigned, which nothing downstream would describe."""
     landscape = Resource(name="plate", size_x=127.76, size_y=85.48, size_z=14.35)
@@ -226,6 +241,18 @@ class ZoneAssignmentTests(unittest.TestCase):
     with self.assertRaises(ValueError) as caught:
       self.deck.assign_child_resource(labware(), location=Coordinate(0, 0, 0))
     self.assertIn("assign_child_at_zone", str(caught.exception))
+
+  def test_labware_wearing_a_zones_name_cannot_replace_the_zone(self) -> None:
+    """A plate named like a zone holder would otherwise take the holder's place in the tree and
+    in the deck's bookkeeping, and the zone would fail the first time it was asked what it held."""
+    impostor = labware("deck_Zone1")
+    with self.assertRaises(ValueError) as caught:
+      self.deck.assign_child_resource(impostor, location=Coordinate(0, 0, 0))
+    self.assertIn("assign_child_at_zone", str(caught.exception))
+    holder = self.deck.get_resource("deck_Zone1")
+    self.assertIn(holder, self.deck.children)
+    self.assertIsNone(self.deck.zones["Zone1"])
+    self.assertIsNone(impostor.parent)
 
   def test_the_summary_says_what_is_where(self) -> None:
     self.deck.assign_child_at_zone(labware("source"), "Zone2")

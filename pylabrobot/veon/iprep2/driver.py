@@ -17,6 +17,7 @@ it.
 """
 
 import asyncio
+import functools
 import json
 import logging
 from typing import Any, Dict, Mapping, Optional
@@ -51,6 +52,22 @@ EVENT_PREFIX = "iprep2"
 # instrument does send an `uptime_tick` every 10 s, so on a live link this never actually elapses,
 # but nothing here depends on that.
 EVENT_READ_TIMEOUT = 60.0
+
+
+@functools.lru_cache(maxsize=None)
+def _warn_unverified() -> None:
+  """Say, once per process, how far this integration has been checked against hardware.
+
+  Cached so that it is said once and not on every `setup`: a warning that repeats on every
+  reconnect gets filtered wholesale, and the warnings that matter - a busy owner, tips left on, a
+  deck the instrument disagrees about - go with it.
+  """
+  logger.warning(
+    "The PyLabRobot i.prep 2 integration has been driven read-only against real instruments, but "
+    "has not yet moved one or handled liquid on one. Treat anything beyond discovery as "
+    "unverified, and please report back once it has been checked - "
+    "https://github.com/PyLabRobot/pylabrobot/issues/1218"
+  )
 
 
 class IPrep2Driver:
@@ -99,8 +116,8 @@ class IPrep2Driver:
 
     self.host = host
     self.port = port
-    self._secure = secure
-    self._follow_events = follow_events
+    self.secure = secure
+    self.follow_events = follow_events
     headers: Mapping[str, str] = {} if api_key is None else {"Authorization": f"Bearer {api_key}"}
 
     scheme = "https" if secure else "http"
@@ -321,11 +338,7 @@ class IPrep2Driver:
       IPrep2Error: If the instrument would not say what it is. Whatever was opened is closed
         again first.
     """
-    logger.warning(
-      "The PyLabRobot i.prep 2 integration has not been checked against physical hardware. "
-      "Treat what it does as unverified, and please report back once it has been - "
-      "https://github.com/PyLabRobot/pylabrobot/issues/1218"
-    )
+    _warn_unverified()
 
     if not self._connected:
       await self.io.setup()
@@ -336,7 +349,7 @@ class IPrep2Driver:
       self._capabilities = await self.request_capabilities()
       readiness = await self.request_readiness()
 
-      if self._follow_events:
+      if self.follow_events:
         await self._start_following_events()
     except BaseException:
       await self._stop_quietly()
@@ -350,9 +363,7 @@ class IPrep2Driver:
       )
     elif readiness.left_dirty:
       logger.warning(
-        "the instrument was left with tips on channels %s and these axes away from home: %s",
-        list(readiness.tips_attached),
-        list(readiness.axes_away_from_home),
+        "the instrument is free but was not put away: %s", "; ".join(readiness.how_left())
       )
 
   async def stop(self) -> None:
