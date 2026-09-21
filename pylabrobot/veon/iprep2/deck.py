@@ -184,6 +184,10 @@ class IPrep2Deck(Deck):
         size_z=0,
         category="iprep2_zone",
         model=f"{DECK_ID}_zone",
+        # Which zone this holder stands for, carried on the holder itself rather than read off its
+        # name: `named()` renames a deck without renaming its children, so a holder's name need
+        # not start with its deck's, and `assign_child_resource` needs to know the zone anyway.
+        metadata={"zone": zone},
       )
       self._zone_holders[zone] = holder
       super().assign_child_resource(holder, location=_zone_location(zone))
@@ -359,13 +363,20 @@ class IPrep2Deck(Deck):
 
     The deck's own children are the zone holders built in `__init__`. Labware goes into a zone
     with `assign_child_at_zone` rather than onto the deck, so that it lands where the instrument
-    believes that zone is. Deserialization re-assigns the holders by name, replacing a placeholder
-    with the loaded one and whatever labware it carries.
+    believes that zone is. Deserialization re-assigns the holders, replacing a placeholder with
+    the loaded one and whatever labware it carries.
+
+    A loaded holder replaces the one standing for its zone, found by the zone it carries in its
+    metadata rather than by its name: a deck renamed with `named()` keeps its holders' old names,
+    and matching on those would leave the loaded holders standing beside six empty ones, with the
+    labware in the tree but in no zone. A holder that does not say which zone it is is matched by
+    name, as one serialized before the zone was carried is.
 
     Args:
       resource: the holder to assign.
       location: where it sits.
-      reassign: whether to replace a holder of the same name.
+      reassign: whether to replace the holder standing for the same zone or wearing the same
+        name.
 
     Raises:
       ValueError: If something other than a zone holder is assigned directly to the deck, whether
@@ -377,14 +388,17 @@ class IPrep2Deck(Deck):
         f"cannot assign {resource.name!r} straight to the deck: labware goes in a zone, with "
         f"assign_child_at_zone(resource, 'Zone1')"
       )
-    existing = next((child for child in self.children if child.name == resource.name), None)
+    zone = resource.metadata.get("zone")
+    existing: Optional[Resource] = self._zone_holders.get(zone) if isinstance(zone, str) else None
+    if existing is None:
+      existing = next((child for child in self.children if child.name == resource.name), None)
     if existing is not None:
       if not reassign:
         raise ValueError(f"{resource.name!r} is already assigned to this deck")
       super().unassign_child_resource(existing)
-      for zone, holder in self._zone_holders.items():
+      for zone_name, holder in self._zone_holders.items():
         if holder is existing:
-          self._zone_holders[zone] = resource
+          self._zone_holders[zone_name] = resource
           break
     super().assign_child_resource(resource, location=location, reassign=reassign)
 

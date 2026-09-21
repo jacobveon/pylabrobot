@@ -108,9 +108,14 @@ class CapabilitiesTests(unittest.TestCase):
     )
 
   def test_an_axis_without_a_range_is_left_out(self) -> None:
-    """Half a range describes nothing, and `null` describes less; neither is a reason to fail."""
+    """Half a range describes nothing, and `null` describes less; neither is a reason to fail.
+    A `null` bound inside an otherwise complete range is the same half-range, and is left out at
+    setup rather than failing the first position checked against it."""
     partial = dict(CAPABILITIES)
-    partial["motion"] = {"axes": ["x", "y"], "travel": {"x": {"min_mm": 0.0}, "y": None}}
+    partial["motion"] = {
+      "axes": ["x", "y", "z1"],
+      "travel": {"x": {"min_mm": 0.0}, "y": None, "z1": {"min_mm": None, "max_mm": 220.0}},
+    }
     self.assertEqual(Capabilities.from_response(partial).motion.travel, {})
 
 
@@ -173,6 +178,23 @@ class ReadinessTests(unittest.TestCase):
       with_everything.how_left(), ["tips on channels [1]", "axes away from home: ['x', 'z1']"]
     )
     self.assertEqual(Readiness.from_response({"busy": False, "at_home": True}).how_left(), [])
+
+  def test_unreadable_tip_presence_is_not_no_tips(self) -> None:
+    """The instrument reports `null` when it could not read tip presence, and says why: an empty
+    list would mean "no tips", which is the dangerous wrong answer. So None is kept as None, is
+    not called dirty (nothing was reported), and is answered by `tips_unknown`."""
+    unknown = Readiness.from_response({"busy": False, "at_home": True, "tips_attached": None})
+    self.assertIsNone(unknown.tips_attached)
+    self.assertTrue(unknown.tips_unknown)
+    self.assertFalse(unknown.left_dirty)
+    self.assertEqual(unknown.how_left(), [])
+
+    clean = Readiness.from_response({"busy": False, "at_home": True, "tips_attached": []})
+    self.assertEqual(clean.tips_attached, ())
+    self.assertFalse(clean.tips_unknown)
+
+    unsaid = Readiness.from_response({"busy": False})
+    self.assertTrue(unsaid.tips_unknown)
 
   def test_a_busy_instrument_is_not_reported_dirty(self) -> None:
     """Something holds it, which is the more useful thing to say."""

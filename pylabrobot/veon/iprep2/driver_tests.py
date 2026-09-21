@@ -216,6 +216,21 @@ class DriverSetupTests(unittest.IsolatedAsyncioTestCase):
     self.assertIn("not at home", message)
     self.assertNotIn("[]", message)
 
+  async def test_unreadable_tip_presence_is_warned_about(self) -> None:
+    """`null` for `tips_attached` means the instrument could not read it, and the warning says
+    so - alongside, not instead of, whatever else was reported, since a parked head can still be
+    one nobody can vouch for."""
+    unknown = dict(READINESS, tips_attached=None)
+    captured = _WarningCatcher()
+    logging.getLogger("pylabrobot.veon.iprep2.driver").addHandler(captured)
+    try:
+      await self._driver(http=_FakeHTTP({"/system/readiness": unknown}))
+    finally:
+      logging.getLogger("pylabrobot.veon.iprep2.driver").removeHandler(captured)
+    (message,) = [m for m in captured.messages if "carry tips" in m]
+    self.assertIn("could not read", message)
+    self.assertFalse(any("not put away" in m for m in captured.messages))
+
   async def test_the_unverified_warning_is_accurate_and_said_once(self) -> None:
     """It says what was checked - read-only, against real instruments - rather than that nothing
     was, and a second setup does not repeat it: a warning on every reconnect gets filtered

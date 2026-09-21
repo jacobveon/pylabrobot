@@ -328,6 +328,34 @@ class SerializationTests(unittest.TestCase):
     self.assertEqual(zone_at(loaded, "Zone1"), Coordinate(76.433, 149.630, 0.0))
     self.assertEqual(len(loaded.children), 6)
 
+  def test_a_renamed_deck_round_trips(self) -> None:
+    """`named()` renames the deck and not its holders, so a loaded holder's name need not start
+    with its deck's. It still lands in its zone - matched by the zone it carries, not by its
+    name - rather than beside a placeholder, with the labware in the tree but in no zone."""
+    deck = IPrep2Deck()
+    deck.assign_child_at_zone(labware("source"), "Zone1")
+    renamed = deck.named("bench")
+
+    for loaded in (IPrep2Deck.deserialize(renamed.serialize()), renamed.copy()):
+      with self.subTest(via=type(loaded).__name__):
+        self.assertEqual(loaded.name, "bench")
+        self.assertEqual(len(loaded.children), 6)
+        self.assertEqual(loaded.zone_names, ZONE_NAMES)
+        held = loaded.zones["Zone1"]
+        assert held is not None
+        self.assertEqual(held.name, "source")
+        self.assertEqual(loaded.get_zone(held), "Zone1")
+        self.assertIs(held.get_root(), loaded)
+
+  def test_a_holder_that_does_not_say_its_zone_is_matched_by_name(self) -> None:
+    """A deck serialized before holders carried their zone still loads."""
+    serialized = IPrep2Deck().serialize()
+    for child in serialized["children"]:
+      child.pop("metadata", None)
+    loaded = IPrep2Deck.deserialize(serialized)
+    self.assertEqual(len(loaded.children), 6)
+    self.assertEqual(loaded.zone_names, ZONE_NAMES)
+
   def test_a_deck_built_with_fewer_zones_comes_back_with_the_same_few(self) -> None:
     deck = IPrep2Deck(zones=("Zone1", "Zone4"))
     loaded = IPrep2Deck.deserialize(deck.serialize())

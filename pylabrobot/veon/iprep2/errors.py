@@ -40,9 +40,12 @@ class IPrep2Error(Exception):
       of these with `is_a` to handle a whole family without naming every leaf.
     http_status: the status the request was answered with.
     message: what the instrument said, for a person. Do not branch on it.
-    payload: the whole `data` object, including fields specific to this code - `channel`,
-      `requested` and `available` on a capacity error, and so on. Read it for anything this class
-      does not name, and tolerate fields you do not recognise.
+    payload: the whole `data` object, including whatever this code carries beyond the fields
+      above. The instrument documents `field` and `detail` on a validation failure, `operation`
+      and `channels` (every selected channel's outcome, keyed by its 1-based number) on a
+      per-channel one, and `uncertain` for what it can no longer vouch for after a failure; a
+      code may carry more. Read it for anything this class does not name, and tolerate fields
+      you do not recognise.
   """
 
   def __init__(
@@ -84,10 +87,13 @@ class IPrep2Error(Exception):
 
   @property
   def channel(self) -> Optional[int]:
-    """Which channel this is about, on a code that names one.
+    """Which channel this is about, on a code that names one as `channel`.
 
     The instrument numbers channels from 1. PyLabRobot indexes them from 0, so this is the
     instrument's number and a caller working in PyLabRobot's terms wants one less.
+
+    A failure across several channels does not name one: it carries `channels` in the payload,
+    keyed by number, with each one's outcome.
 
     Returns:
       The channel, or None when the code does not name one.
@@ -135,8 +141,8 @@ class IPrep2TipError(IPrep2Error):
 class IPrep2CapacityError(IPrep2Error):
   """More volume was asked for than the tip or channel holds.
 
-  `payload["requested"]` and `payload["available"]` carry the two figures in the units of
-  `payload["quantity"]`.
+  What the code carries beyond the message is not fixed by the instrument's error reference;
+  whatever it sent is in `payload`.
   """
 
 
@@ -247,9 +253,10 @@ def error_from_envelope(http_status: int, envelope: Dict[str, Any]) -> IPrep2Err
 
   lineage = (error_code, *inherits) if error_code else inherits
   cls = _class_for(lineage)
-  if cls is IPrep2Error and error_code:
+  if error_code and not any(code.split(".", 1)[0] in _FAMILIES for code in lineage):
     # Worth saying: a lineage with nothing known in it is handled, but less precisely than it
-    # could be, and the fix is to add the family.
+    # could be, and the fix is to add the family. Judged by the families rather than by the class
+    # chosen, since a known family may deliberately map to the base class.
     logger.debug(
       "no known i.prep 2 error family in %r (inherits %r); raising it as IPrep2Error",
       error_code,

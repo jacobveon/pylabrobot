@@ -1,6 +1,8 @@
 """Turning what the instrument reported into something a caller can catch."""
 
+import logging
 import unittest
+from typing import List
 
 from pylabrobot.veon.iprep2.errors import (
   IPrep2BusyError,
@@ -104,6 +106,31 @@ class ErrorFromEnvelopeTests(unittest.TestCase):
     raised = error_from_envelope(500, envelope(error_code="GRIPPER.JAMMED", message="stuck"))
     self.assertIsInstance(raised, IPrep2Error)
     self.assertEqual(raised.error_code, "GRIPPER.JAMMED")
+
+  def test_only_a_lineage_with_no_known_family_is_reported_as_one(self) -> None:
+    """`CHANNEL` maps to the base class on purpose, and is not an unknown family for it."""
+
+    class _Catcher(logging.Handler):
+      def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.messages: List[str] = []
+
+      def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+    captured = _Catcher()
+    logger = logging.getLogger("pylabrobot.veon.iprep2.errors")
+    previous = logger.level
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(captured)
+    try:
+      error_from_envelope(500, envelope(error_code="CHANNEL.FAILURE"))
+      self.assertEqual(captured.messages, [])
+      error_from_envelope(500, envelope(error_code="GRIPPER.JAMMED"))
+      self.assertEqual(len(captured.messages), 1)
+    finally:
+      logger.removeHandler(captured)
+      logger.setLevel(previous)
 
   def test_a_body_with_no_code_is_still_raised(self) -> None:
     """A proxy or a crash rather than the instrument answering. The caller needs the failure."""

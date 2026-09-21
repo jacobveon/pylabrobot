@@ -365,6 +365,14 @@ class IPrep2Driver:
       logger.warning(
         "the instrument is free but was not put away: %s", "; ".join(readiness.how_left())
       )
+    if readiness.tips_unknown:
+      # Said separately from the two above, since it is true alongside either: not knowing
+      # whether the head carries tips is not the same as a clean head, and the instrument
+      # reports it as `null` for exactly that reason.
+      logger.warning(
+        "the instrument could not read whether its channels carry tips; do not take the head "
+        "for clean"
+      )
 
   async def stop(self) -> None:
     """Stop following the instrument and close the connections.

@@ -15,6 +15,11 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 
+def _is_number(value: Any) -> bool:
+  """Whether a JSON value is a number - and not a bool, which Python counts as one."""
+  return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 @dataclass(frozen=True)
 class AxisTravel:
   """How far one axis moves, in mm.
@@ -187,10 +192,14 @@ class Capabilities:
       ),
       motion=MotionCapabilities(
         axes=tuple(motion.get("axes") or ()),
+        # An axis is left out unless both of its bounds are numbers: half a range describes
+        # nothing, and a `null` bound would fail the first `contains` rather than this line.
         travel={
           axis: AxisTravel(minimum=bounds["min_mm"], maximum=bounds["max_mm"])
           for axis, bounds in (motion.get("travel") or {}).items()
-          if isinstance(bounds, dict) and "min_mm" in bounds and "max_mm" in bounds
+          if isinstance(bounds, dict)
+          and _is_number(bounds.get("min_mm"))
+          and _is_number(bounds.get("max_mm"))
         },
       ),
       deck=DeckCapabilities(
@@ -262,7 +271,9 @@ class Readiness:
     at_home: whether every axis is at its home position. None when the instrument did not say,
       which is not the same as saying no.
     axes_away_from_home: the axes that are not, named as the instrument names them.
-    tips_attached: the channels carrying a tip, as the instrument numbers them.
+    tips_attached: the channels carrying a tip, as the instrument numbers them. None when the
+      instrument could not read tip presence, which it reports as `null` and not as an empty
+      list - "no tips" is the dangerous wrong answer, and not knowing is not the same as it.
   """
 
   busy: bool
@@ -270,7 +281,7 @@ class Readiness:
   request_id: Optional[str] = None
   at_home: Optional[bool] = None
   axes_away_from_home: Tuple[str, ...] = ()
-  tips_attached: Tuple[int, ...] = ()
+  tips_attached: Optional[Tuple[int, ...]] = None
 
   @property
   def left_dirty(self) -> bool:
@@ -280,8 +291,10 @@ class Readiness:
     operation starts from somewhere no protocol chose, so it is worth knowing before commanding
     one.
 
-    An instrument that did not say whether it is home is not called dirty for it: only what it
-    did say - tips on, axes named as away, or `at_home` reported false - counts.
+    An instrument that did not say whether it is home, or could not read whether tips are on, is
+    not called dirty for it: only what it did say - tips on, axes named as away, or `at_home`
+    reported false - counts. Whether tip presence is unknown is `tips_unknown`, which a caller
+    that needs a clean head has to check as well as this.
 
     Returns:
       Whether it is free with tips on or an axis away from home.
@@ -289,6 +302,18 @@ class Readiness:
     return not self.busy and (
       bool(self.tips_attached) or bool(self.axes_away_from_home) or self.at_home is False
     )
+
+  @property
+  def tips_unknown(self) -> bool:
+    """Whether the instrument could not read which channels carry a tip.
+
+    Distinct from an empty `tips_attached`, which means it looked and found none. A caller that
+    needs a clean head cannot take this as one.
+
+    Returns:
+      Whether tip presence is unknown.
+    """
+    return self.tips_attached is None
 
   def how_left(self) -> List[str]:
     """What was left undone, one phrase per signal the instrument actually reported.
@@ -324,7 +349,7 @@ class Readiness:
       request_id=data.get("request_id"),
       at_home=None if data.get("at_home") is None else bool(data["at_home"]),
       axes_away_from_home=tuple(data.get("axes_away_from_home") or ()),
-      tips_attached=tuple(data.get("tips_attached") or ()),
+      tips_attached=None if data.get("tips_attached") is None else tuple(data["tips_attached"]),
     )
 
 
