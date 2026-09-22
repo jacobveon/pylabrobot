@@ -10,6 +10,14 @@ What the instrument contributes is calibration: the per-zone offset an operator 
 bench, which says where this instrument found a zone rather than where the drawing puts it.
 `apply_calibration` moves the zones by it.
 
+The instrument's x and y agree with PyLabRobot's. The gantry carries the channels left to right
+along x, and the deck itself moves along y: increasing y brings the deck forward, so in the deck's
+own frame - the one everything here is in - the channels travel toward the back as y grows, which
+is PyLabRobot's y. Home is x = 0, y = 0, with channel 1 over the deck's front-left; a zone's
+position is where channel 1 sits over the zone's front-left corner, and labware in the zone has
+its origin there too. The instrument's own plate definitions confirm the handedness: their A1,
+H1 and A12 fall where PyLabRobot puts them on a plate turned a quarter turn anticlockwise.
+
 A note on Z, because the two frames disagree. PyLabRobot measures Z upward from the deck surface,
 so a taller plate reaches a higher z. The instrument measures it downward from the head's home
 position, so its deck surface reads about 217 mm and a taller plate reaches a *smaller* number.
@@ -35,12 +43,11 @@ from pylabrobot.utils.linalg import matrix_vector_multiply_3x3
 DECK_ID = "iprep2-standard-deck"
 DECK_DEFINITION_VERSION = "1.0.0"
 
-# The footprint, as the deck definition's `dimensions` give it. The zones sit in the front-left
-# part of it: Zone6 ends 169 mm short of the right edge and Zone1 ends 242 mm short of the back,
-# and the zone positions are the instrument's own coordinates, whose origin need not be the
-# deck's front-left corner - Zones 4-6 start 4.4 mm in front of y = 0. Where the origin falls on
-# the physical deck is not in the definition, so the zones are drawn where the instrument
-# addresses them and the footprint around them as measured.
+# The footprint, as the deck definition's `dimensions` give it. These are the instrument's
+# outside dimensions, 532 mm wide by 520 mm deep, not the moving deck plate's, so the zones sit
+# in the front-left of the rectangle: the gantry's frame takes the sides and the deck's travel
+# takes the back. Zones 4-6 start 4.4 mm in front of y = 0, which is where channel 1 sits at
+# home, so the plate's front edge reaches a little past the head's reach.
 SIZE_X = 532.0
 SIZE_Y = 520.0
 # The instrument's Z reading with a channel touching the deck surface. Its Z frame starts at the
