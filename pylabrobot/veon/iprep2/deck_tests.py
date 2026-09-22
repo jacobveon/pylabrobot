@@ -71,10 +71,16 @@ class DeckGeometryTests(unittest.TestCase):
     self.assertEqual(max(heights.values()), 0.0)
     self.assertAlmostEqual(min(heights.values()), -0.345, places=3)
 
+  def test_the_footprint_is_the_definitions(self) -> None:
+    """`iprep2-standard-deck` 1.0.0 gives the deck as 532 x 520 mm, and this carries those
+    figures rather than ones enclosing the zones."""
+    self.assertEqual((self.deck.get_size_x(), self.deck.get_size_y()), (532.0, 520.0))
+    self.assertEqual((SIZE_X, SIZE_Y), (532.0, 520.0))
+
   def test_every_zone_lies_within_the_decks_far_edges(self) -> None:
     """The footprint has to enclose the zones, or the visualizer draws plates off the deck. The
-    front edge is not checked: Zones 4-6 start 4.4 mm before y = 0, which waits on the CAD
-    figures rather than on a number here."""
+    front edge is not checked: Zones 4-6 start 4.4 mm before y = 0, since the zone positions are
+    the instrument's coordinates and its origin is not quite the deck's front edge."""
     for zone in self.deck.zone_names:
       at = zone_at(self.deck, zone)
       self.assertLessEqual(at.x + ZONE_SIZE_X, SIZE_X, zone)

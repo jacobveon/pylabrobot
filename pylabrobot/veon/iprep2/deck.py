@@ -35,13 +35,14 @@ from pylabrobot.utils.linalg import matrix_vector_multiply_3x3
 DECK_ID = "iprep2-standard-deck"
 DECK_DEFINITION_VERSION = "1.0.0"
 
-# The footprint. Provisional: these enclose the zones below, which the instrument's own
-# `dimensions_mm` (350 x 350) do not - Zone3 and Zone6 would run 13 mm past its right edge - and
-# the figures from the CAD model will replace them. Zones 4-6 still start 4.4 mm in front of
-# y = 0, which says the instrument's origin is not quite the deck's front edge; that too waits on
-# the drawing.
-SIZE_X = 365.0
-SIZE_Y = 280.0
+# The footprint, as the deck definition's `dimensions` give it. The zones sit in the front-left
+# part of it: Zone6 ends 169 mm short of the right edge and Zone1 ends 242 mm short of the back,
+# and the zone positions are the instrument's own coordinates, whose origin need not be the
+# deck's front-left corner - Zones 4-6 start 4.4 mm in front of y = 0. Where the origin falls on
+# the physical deck is not in the definition, so the zones are drawn where the instrument
+# addresses them and the footprint around them as measured.
+SIZE_X = 532.0
+SIZE_Y = 520.0
 # The instrument's Z reading with a channel touching the deck surface. Its Z frame starts at the
 # channel's home position and grows as the channel comes down, so this is the head's full travel
 # to the deck - the height of the working volume above the surface - and not the thickness of any
