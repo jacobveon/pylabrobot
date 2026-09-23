@@ -183,9 +183,12 @@ class WebSocket(IOBase):
     # Everything below describes ONE connection, and is rebuilt by `_connect` for the next one.
     # A queue that outlived its connection hands a reader the previous link's messages, and worse
     # its end-of-stream marker, which would end a live link on its first read.
-    self._queue: asyncio.Queue[Union[str, bytes, _Closed]] = asyncio.Queue(
-      maxsize=max_queued_messages
-    )
+    #
+    # None until there is a connection, rather than built here: an asyncio primitive binds to a
+    # loop when it is constructed, and this object is built in ordinary synchronous code - where
+    # on Python 3.9 there may be no loop to bind to at all. Nothing needs either of these before
+    # `setup`, so neither exists before it.
+    self._queue: Optional[asyncio.Queue[Union[str, bytes, _Closed]]] = None
     # What the stream ended with, as the cause of the error a read past the end raises. Set for
     # any end the device made, including an orderly one; None when this side closed the link,
     # which had no error to carry. The read fails either way: there is nothing more to read.
@@ -201,7 +204,7 @@ class WebSocket(IOBase):
     # object. Reported rather than counted silently: a caller that falls behind is a caller
     # missing device state.
     self.dropped_messages = 0
-    self._write_lock = asyncio.Lock()
+    self._write_lock: Optional[asyncio.Lock] = None
 
   def _refuse_credentials_in_the_clear(self) -> None:
     """Refuse to open an unencrypted link carrying a credential, wherever it is carried.
@@ -269,6 +272,9 @@ class WebSocket(IOBase):
     # Only now, with a connection in hand. A fresh queue put here before connecting would be
     # left empty and unmarked by a connect that raised, and every read would wait it out.
     self._queue = asyncio.Queue(maxsize=self._max_queued_messages)
+    # One lock for the life of the object, built here for the same reason the queue is. A write
+    # already in flight is on the connection that is going away, so it does not want a new one.
+    self._write_lock = self._write_lock or asyncio.Lock()
     self._closed_by = None
     self._ended = False
     self._dropping = False
@@ -373,7 +379,7 @@ class WebSocket(IOBase):
     A second marker is not free. `_enqueue` drops the oldest message to make room for it, so
     marking twice costs an unread message exactly when a reader has fallen behind.
     """
-    if self._ended:
+    if self._ended or self._queue is None:
       return
     self._ended = True
     self._enqueue(_CLOSED)
@@ -384,8 +390,11 @@ class WebSocket(IOBase):
     Args:
       message: the message that arrived, or the end-of-stream marker.
     """
-    if self._queue.full():
-      self._queue.get_nowait()
+    queue = self._queue
+    if queue is None:
+      return
+    if queue.full():
+      queue.get_nowait()
       self.dropped_messages += 1
       if not self._dropping:
         self._dropping = True
@@ -398,7 +407,7 @@ class WebSocket(IOBase):
         )
     else:
       self._dropping = False
-    self._queue.put_nowait(message)
+    queue.put_nowait(message)
 
   async def read(self, timeout: Optional[float] = None) -> bytes:
     """Read the next message that arrived.
@@ -428,6 +437,8 @@ class WebSocket(IOBase):
     # reconnect swaps `self._queue`, and putting this queue's marker into that one would end the
     # new connection's stream before it delivered anything.
     queue = self._queue
+    if queue is None:
+      raise ConnectionError(f"Websocket to {self._safe_url} is closed")
     try:
       message = await asyncio.wait_for(queue.get(), timeout=timeout)
     except asyncio.TimeoutError as exc:
@@ -485,10 +496,10 @@ class WebSocket(IOBase):
       raise RuntimeError(
         f"WebSocket for '{self.human_readable_device_name}' not set up; call setup() first"
       )
-    connection = self._connection
-    if connection is None:
+    connection, lock = self._connection, self._write_lock
+    if connection is None or lock is None:
       raise ConnectionError(f"Websocket to {self._safe_url} is closed")
-    async with self._write_lock:
+    async with lock:
       try:
         await connection.send(data.decode("utf-8") if text else data)
       except websockets.exceptions.ConnectionClosed as exc:
