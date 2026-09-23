@@ -20,9 +20,10 @@ import asyncio
 import functools
 import json
 import logging
+import urllib.parse
 from typing import Any, Dict, Mapping, Optional
 
-from pylabrobot.events import device_reference, emit_event
+from pylabrobot.events import device_reference, get_event_bus
 from pylabrobot.io.http import HTTP, HTTPError
 from pylabrobot.io.websocket import WebSocket
 from pylabrobot.veon.iprep2.configuration import (
@@ -95,7 +96,8 @@ class IPrep2Driver:
       api_key: a bearer token, for an instrument that requires one. An instrument on a bench is
         unauthenticated and wants None; one reachable over a public address is not. Sent as an
         `Authorization` header, which `pylabrobot.io` keeps out of its logs and captures, and
-        refused over an unencrypted connection - so a key requires `secure`.
+        refused over an unencrypted connection - so a key requires `secure`. Not used with `io`,
+        whose own headers are sent instead.
       secure: whether to reach the instrument over TLS, i.e. `https://` and `wss://`.
       timeout: how long to wait for a request, in seconds. Long by default because the instrument
         answers an operation when it has finished it, not when it has accepted it, so a transfer's
@@ -103,6 +105,10 @@ class IPrep2Driver:
       follow_events: whether to open the instrument's event stream and put what arrives on
         PyLabRobot's event bus. Off means the model only knows what this driver did itself.
       io: an already-built HTTP transport to use instead of one built from the arguments above.
+        The instrument's address, and whether it is reached over TLS, are then read from its
+        `base_url` rather than from `host`, `port` and `secure`, and the event stream is opened
+        against that address with the transport's headers - so both connections reach the same
+        instrument, and `host` and `port` name it.
       events_io: likewise for the event stream.
 
     Raises:
@@ -114,22 +120,34 @@ class IPrep2Driver:
         "pass secure=True, or reach the instrument without a key"
       )
 
+    headers: Mapping[str, str]
+    if io is not None:
+      where = urllib.parse.urlsplit(io.base_url)
+      secure = where.scheme == "https"
+      host = where.hostname or host
+      port = where.port or (443 if secure else 80)
+      netloc = where.netloc
+      # Whatever the instrument's API is served under, its event stream is served under too.
+      root = where.path[: -len(API_PATH)] if where.path.endswith(API_PATH) else where.path
+      headers = io.headers
+    else:
+      netloc, root = f"{host}:{port}", ""
+      headers = {} if api_key is None else {"Authorization": f"Bearer {api_key}"}
+
     self.host = host
     self.port = port
     self.secure = secure
     self.follow_events = follow_events
-    headers: Mapping[str, str] = {} if api_key is None else {"Authorization": f"Bearer {api_key}"}
 
-    scheme = "https" if secure else "http"
     self.io = io or HTTP(
       human_readable_device_name=f"i.prep 2 at {host}:{port}",
-      base_url=f"{scheme}://{host}:{port}{API_PATH}",
+      base_url=f"{'https' if secure else 'http'}://{netloc}{API_PATH}",
       headers=headers,
       timeout=timeout,
     )
     self.events_io = events_io or WebSocket(
       human_readable_device_name=f"i.prep 2 events at {host}:{port}",
-      url=f"{'wss' if secure else 'ws'}://{host}:{port}{EVENTS_PATH}",
+      url=f"{'wss' if secure else 'ws'}://{netloc}{root}{EVENTS_PATH}",
       headers=headers,
     )
 
@@ -139,6 +157,10 @@ class IPrep2Driver:
     self._capabilities: Optional[Capabilities] = None
     self._events_task: Optional[asyncio.Task[None]] = None
     self._connected = False
+    # Counted up by every `stop`, so a `setup` can tell that one ran while it was waiting on the
+    # instrument - after which what it goes on to open would outlive the stop that was meant to
+    # close it.
+    self._stops = 0
 
   # ----------------------------------------
   # What the instrument turned out to be
@@ -257,7 +279,10 @@ class IPrep2Driver:
       try:
         reported = json.loads(exc.body)
       except ValueError:
-        # Not an envelope at all - a proxy or a crash rather than the instrument answering. Still
+        reported = None
+      if not isinstance(reported, dict):
+        # Not an envelope at all - a proxy or a crash rather than the instrument answering, which
+        # may not be JSON, or may be JSON that is not an object (`"Bad Gateway"`, `null`). Still
         # raised as one of ours, because what a caller needs is the failure, not a parse error.
         reported = {"message": exc.body}
       raise error_from_envelope(exc.status, reported) from exc
@@ -336,26 +361,35 @@ class IPrep2Driver:
 
     Raises:
       IPrep2Error: If the instrument would not say what it is. Whatever was opened is closed
-        again first.
+        again first, and nothing read is kept.
+      RuntimeError: If `stop` was called while this was running. What this opened is closed
+        again rather than left open behind the stop.
     """
     _warn_unverified()
+    stops = self._stops
 
     if not self._connected:
       await self.io.setup()
       self._connected = True
 
     try:
-      self._identity = await self.request_identity()
-      self._capabilities = await self.request_capabilities()
+      identity = await self.request_identity()
+      capabilities = await self.request_capabilities()
       readiness = await self.request_readiness()
+      # Held together and only once both are read, so a setup that fails between them cannot
+      # leave an identity with nothing to describe, or one instrument's identity beside
+      # another's capabilities.
+      self._identity, self._capabilities = identity, capabilities
 
       if self.follow_events:
         await self._start_following_events()
+      if self._stops != stops:
+        raise RuntimeError("`stop()` was called while `setup()` was running")
     except BaseException:
       await self._stop_quietly()
       raise
 
-    for line in describe(self._identity, self._capabilities):
+    for line in describe(identity, capabilities):
       logger.info("%s", line)
     if readiness.busy:
       logger.warning(
@@ -380,17 +414,22 @@ class IPrep2Driver:
     Leaves the instrument exactly as it is. Nothing is homed and no tip is ejected: what is safe
     to do with a tip depends on what is under it.
     """
+    self._stops += 1
     await self._stop_following_events()
     if self._connected:
       await self.io.stop()
       self._connected = False
 
   async def _stop_quietly(self) -> None:
-    """Stop, without letting a failure in stopping hide what went wrong before it.
+    """Stop and forget what was read, without letting a failure in stopping hide what went wrong
+    before it.
 
     For the error paths of `setup`: what the caller needs is why setup failed, and a socket that
-    would not close on the way out is a footnote to that, not a replacement for it.
+    would not close on the way out is a footnote to that, not a replacement for it. What was read
+    goes too, since a setup that failed has not established what the instrument is.
     """
+    self._identity = None
+    self._capabilities = None
     try:
       await self.stop()
     except Exception as exc:
@@ -475,8 +514,17 @@ class IPrep2Driver:
       logger.warning("an i.prep 2 event did not say what it was: %r", raw[:200])
       return
 
-    emit_event(
+    # The bus is whichever was in scope where `setup` started this follower, as for any task
+    # started there, or else the process-wide one. The event context is not carried with it: the
+    # instrument reports what it did on its own account, not as part of whatever PyLabRobot
+    # operation happened to surround `setup`, which is the context this task would otherwise
+    # stamp on every event for as long as it runs.
+    bus = get_event_bus()
+    if bus is None or not bus.has_listeners:
+      return
+    bus.emit(
       f"{EVENT_PREFIX}.{name}",
+      context={},
       device=device_reference(self, name=f"{self.host}:{self.port}"),
       timestamp=event.get("timestamp"),
       source=event.get("source"),

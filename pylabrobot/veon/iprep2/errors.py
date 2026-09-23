@@ -40,12 +40,12 @@ class IPrep2Error(Exception):
       of these with `is_a` to handle a whole family without naming every leaf.
     http_status: the status the request was answered with.
     message: what the instrument said, for a person. Do not branch on it.
-    payload: the whole `data` object, including whatever this code carries beyond the fields
-      above. The instrument documents `field` and `detail` on a validation failure, `operation`
-      and `channels` (every selected channel's outcome, keyed by its 1-based number) on a
-      per-channel one, and `uncertain` for what it can no longer vouch for after a failure; a
-      code may carry more. Read it for anything this class does not name, and tolerate fields
-      you do not recognise.
+    payload: the whole `data` object as it arrived, including whatever this code carries beyond
+      the fields above. The instrument documents `field` and `detail` on a validation failure,
+      `operation` and `channels` on a per-channel one, and `uncertain` for what it can no longer
+      vouch for after a failure; a code may carry more. Read it for anything this class does not
+      name, and tolerate fields you do not recognise. `channels` arrives keyed by strings, as
+      JSON keys are; the `channels` property keys it by number.
   """
 
   def __init__(
@@ -74,6 +74,20 @@ class IPrep2Error(Exception):
     self.inherits = inherits
     super().__init__(f"{error_code or f'HTTP {http_status}'}: {message}")
 
+  def __reduce__(self) -> Tuple[Any, ...]:
+    """Rebuild from every field rather than from the message alone.
+
+    `Exception` pickles and copies itself by calling the class with `args`, which holds only the
+    formatted message and so cannot satisfy this constructor.
+
+    Returns:
+      The class and the arguments that rebuild this error.
+    """
+    return (
+      self.__class__,
+      (self.error_code, self.domain, self.http_status, self.message, self.payload, self.inherits),
+    )
+
   def is_a(self, code: str) -> bool:
     """Whether this error is the given code, or descends from it.
 
@@ -92,14 +106,33 @@ class IPrep2Error(Exception):
     The instrument numbers channels from 1. PyLabRobot indexes them from 0, so this is the
     instrument's number and a caller working in PyLabRobot's terms wants one less.
 
-    A failure across several channels does not name one: it carries `channels` in the payload,
-    keyed by number, with each one's outcome.
+    A failure across several channels does not name one: see `channels`.
 
     Returns:
       The channel, or None when the code does not name one.
     """
     channel = self.payload.get("channel")
-    return channel if isinstance(channel, int) else None
+    # `bool` is an `int` to Python, and a JSON `true` is not a channel.
+    return channel if isinstance(channel, int) and not isinstance(channel, bool) else None
+
+  @property
+  def channels(self) -> Dict[int, Any]:
+    """Every selected channel's outcome, on a per-channel failure.
+
+    The instrument reports every channel it was asked to use, not only the ones that failed, so a
+    partial failure is visible rather than inferred from absence. Each outcome carries an
+    `outcome` of `ok`, `failed` or `not_attempted`, and whatever the code adds.
+
+    Keyed by the instrument's channel number, from 1, as an `int`: JSON carries the keys as
+    strings, and a lookup by number would otherwise miss every one.
+
+    Returns:
+      The outcome per channel, empty when the code reports none.
+    """
+    reported = self.payload.get("channels")
+    if not isinstance(reported, dict):
+      return {}
+    return {int(key): outcome for key, outcome in reported.items() if str(key).isdigit()}
 
 
 class IPrep2ValidationError(IPrep2Error):
@@ -187,11 +220,28 @@ _FAMILIES: Dict[str, Type[IPrep2Error]] = {
 }
 
 
-# The few codes that mean something more specific than their family. Busy is the one a caller
-# handles differently from everything else in its family - by waiting - so it is the one named.
+# Whole codes that pick a class of their own. Busy is the one a caller handles differently from
+# everything else in its family - by waiting - so it is named. The others have no dot, and so no
+# family to be found by: `VALIDATION_ERROR` is what the instrument's own provisioning endpoints
+# send, and `SERVICE_UNAVAILABLE` is the generic code it fills in for a 503, which it answers when
+# the instrument cannot yet take a request at all.
 _CODES: Dict[str, Type[IPrep2Error]] = {
   "INSTRUMENT.BUSY": IPrep2BusyError,
+  "VALIDATION_ERROR": IPrep2ValidationError,
+  "SERVICE_UNAVAILABLE": IPrep2InstrumentError,
 }
+
+
+def _is_known(code: str) -> bool:
+  """Whether a code picks a class here, as a whole code or by its family.
+
+  Args:
+    code: an error code.
+
+  Returns:
+    Whether it is named in `_CODES` or its family is in `_FAMILIES`.
+  """
+  return code in _CODES or code.split(".", 1)[0] in _FAMILIES
 
 
 def _class_for(lineage: Tuple[str, ...]) -> Type[IPrep2Error]:
@@ -253,7 +303,7 @@ def error_from_envelope(http_status: int, envelope: Dict[str, Any]) -> IPrep2Err
 
   lineage = (error_code, *inherits) if error_code else inherits
   cls = _class_for(lineage)
-  if error_code and not any(code.split(".", 1)[0] in _FAMILIES for code in lineage):
+  if error_code and not any(_is_known(code) for code in lineage):
     # Worth saying: a lineage with nothing known in it is handled, but less precisely than it
     # could be, and the fix is to add the family. Judged by the families rather than by the class
     # chosen, since a known family may deliberately map to the base class.

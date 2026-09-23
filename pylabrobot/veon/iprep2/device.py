@@ -35,6 +35,7 @@ class IPrep2Device(Resource):
     port: int = DEFAULT_PORT,
     api_key: Optional[str] = None,
     secure: bool = False,
+    timeout: float = 300.0,
     follow_events: bool = True,
     name: str = "i.prep 2",
     model: Optional[str] = None,
@@ -55,6 +56,7 @@ class IPrep2Device(Resource):
       port: the port it serves on.
       api_key: a bearer token, for an instrument that requires one. Requires `secure`.
       secure: whether to reach the instrument over TLS.
+      timeout: how long to wait for a request, in seconds. See `IPrep2Driver`.
       follow_events: whether to follow the instrument's event stream.
       name: what to call this device in the resource tree.
       model: which kind of resource this is, in PyLabRobot's terms. Not the instrument's own
@@ -82,7 +84,12 @@ class IPrep2Device(Resource):
       driver
       if driver is not None
       else IPrep2Driver(
-        host=host, port=port, api_key=api_key, secure=secure, follow_events=follow_events
+        host=host,
+        port=port,
+        api_key=api_key,
+        secure=secure,
+        timeout=timeout,
+        follow_events=follow_events,
       )
     )
     self.assign_child_resource(deck, location=deck.location or Coordinate(0, 0, 0))
@@ -228,31 +235,37 @@ class IPrep2Device(Resource):
 
     The device's one child is its deck, assigned in `__init__`. Deserialization then assigns the
     serialized deck, which carries the labware; it replaces the one built by default rather than
-    standing beside it, and becomes `self.deck`.
+    standing beside it, and becomes `self.deck`. Any `IPrep2Deck` replaces the deck, whatever it
+    is called: the device carries one, and a deck under another name beside it would hold the
+    labware while `self.deck` - which setup calibrates and checks - held none.
 
     Args:
       resource: the child.
       location: where it sits.
-      reassign: whether to replace a child of the same name.
+      reassign: whether to replace the deck, or a child of the same name.
 
     Raises:
-      ValueError: If a child of the same name is already here and `reassign` is False, or if
-        what would replace the deck is not an `IPrep2Deck`. The device carries one deck and
-        answers for it, so it cannot be swapped for something that does not behave as one.
+      ValueError: If the child would replace the deck or one of the same name and `reassign` is
+        False, or if what is named like the deck is not an `IPrep2Deck`. The device carries one
+        deck and answers for it, so it cannot be swapped for something that does not behave as
+        one.
     """
-    existing = next((child for child in self.children if child.name == resource.name), None)
-    if existing is not None:
-      if not reassign:
-        raise ValueError(f"{resource.name!r} is already assigned to this device")
-      if existing is self.deck:
-        if not isinstance(resource, IPrep2Deck):
+    if isinstance(resource, IPrep2Deck):
+      if self.deck.parent is self:
+        if not reassign:
+          raise ValueError(f"this device already carries the deck {self.deck.name!r}")
+        super().unassign_child_resource(self.deck)
+      self.deck = resource
+    else:
+      existing = next((child for child in self.children if child.name == resource.name), None)
+      if existing is not None:
+        if not reassign:
+          raise ValueError(f"{resource.name!r} is already assigned to this device")
+        if existing is self.deck:
           raise ValueError(
             f"{resource.name!r} is named like this device's deck but is not an IPrep2Deck, and "
             f"the device carries one deck and answers for it"
           )
-        super().unassign_child_resource(existing)
-        self.deck = resource
-      else:
         super().unassign_child_resource(existing)
     super().assign_child_resource(resource, location=location, reassign=reassign)
 
@@ -272,6 +285,7 @@ class IPrep2Device(Resource):
       "host": self.driver.host,
       "port": self.driver.port,
       "secure": self.driver.secure,
+      "timeout": self.driver.io.timeout,
       "follow_events": self.driver.follow_events,
     }
 

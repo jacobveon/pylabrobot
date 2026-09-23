@@ -6,7 +6,7 @@ import logging
 import unittest
 from typing import Any, Dict, List, Optional, Union
 
-from pylabrobot.events import EventBus, PLREvent, use_event_bus
+from pylabrobot.events import EventBus, PLREvent, event_context, use_event_bus
 from pylabrobot.io.http import HTTP, HTTPError
 from pylabrobot.io.websocket import WebSocket
 from pylabrobot.veon.iprep2.configuration_tests import CAPABILITIES, INFO
@@ -247,6 +247,56 @@ class DriverSetupTests(unittest.IsolatedAsyncioTestCase):
     self.assertIn("read-only against real instruments", message)
     self.assertNotIn("not been checked", message)
 
+  async def test_a_setup_that_fails_keeps_nothing_it_read(self) -> None:
+    """An identity read before capabilities failed describes nothing, and `str` - which a
+    notebook and a traceback both call - must still answer rather than raise."""
+    http = _FakeHTTP({"/system/capabilities": HTTPError("GET", "/x", 500, "{}")})
+    driver = IPrep2Driver(io=http, events_io=_FakeEvents())
+    with self.assertRaises(IPrep2Error):
+      await driver.setup()
+    self.assertIn("not set up", str(driver))
+    with self.assertRaises(RuntimeError):
+      driver.identity
+
+  async def test_a_failed_second_setup_does_not_mix_two_instruments(self) -> None:
+    """A re-setup that reads a different identity and then fails must not leave it beside the
+    first instrument's capabilities."""
+    http = _FakeHTTP()
+    driver = await self._driver(http=http)
+    http.answers["/system/info"] = dict(INFO, name="other-unit")
+    http.answers["/system/capabilities"] = HTTPError("GET", "/x", 500, "{}")
+    with self.assertRaises(IPrep2Error):
+      await driver.setup()
+    self.assertIn("not set up", str(driver))
+    with self.assertRaises(RuntimeError):
+      driver.capabilities
+
+  async def test_a_stop_during_setup_leaves_nothing_open(self) -> None:
+    """`stop` can land while setup is still opening the event stream, when there is no
+    connection yet for it to close. Setup then closes what it went on to open, and says so."""
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+
+    class _SlowToConnect(_FakeEvents):
+      async def setup(self) -> None:
+        entered.set()
+        await gate.wait()
+        await super().setup()
+
+    events = _SlowToConnect()
+    http = _FakeHTTP()
+    driver = IPrep2Driver(io=http, events_io=events)
+    setting_up = asyncio.ensure_future(driver.setup())
+    await entered.wait()
+    await driver.stop()
+    gate.set()
+    with self.assertRaises(RuntimeError) as caught:
+      await setting_up
+    self.assertIn("stop()", str(caught.exception))
+    self.assertFalse(events.set_up)
+    self.assertFalse(http.set_up)
+    self.assertIsNone(driver._events_task)
+
   async def test_the_event_stream_can_be_left_closed(self) -> None:
     """For a caller that only wants to command the instrument."""
     events = _FakeEvents()
@@ -317,6 +367,17 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
       await driver.request("GET", "/x")
     self.assertEqual(caught.exception.http_status, 502)
 
+  async def test_a_failure_that_is_json_but_not_an_object_is_still_ours(self) -> None:
+    """A gateway answering `"Service Unavailable"` or `null` parses, and is still not an
+    envelope. The caller's `except IPrep2Error` has to catch it, with the body in the message."""
+    for body in ("null", '"Service Unavailable"', '[{"detail": "x"}]', "503"):
+      with self.subTest(body=body):
+        driver = await self._driver({"/x": HTTPError("GET", "/x", 503, body)})
+        with self.assertRaises(IPrep2Error) as caught:
+          await driver.request("GET", "/x")
+        self.assertEqual(caught.exception.http_status, 503)
+        self.assertIn(body, str(caught.exception))
+
 
 class EventTests(unittest.IsolatedAsyncioTestCase):
   """Putting what the instrument pushes onto PyLabRobot's event bus."""
@@ -357,7 +418,24 @@ class EventTests(unittest.IsolatedAsyncioTestCase):
     reads this one the same way."""
     (seen,) = await self._events([event("tip_pickup")])
     self.assertEqual(seen.data["device"]["type"], "IPrep2Driver")
-    self.assertEqual(seen.data["device"]["name"], "localhost:11011")
+    self.assertEqual(seen.data["device"]["name"], "device.invalid:80")
+
+  async def test_an_event_carries_no_context_from_around_setup(self) -> None:
+    """The follower is started inside whatever operation surrounded `setup`, and the instrument's
+    events are not part of it: they must not all be stamped with that operation for as long as
+    the stream runs."""
+    seen: List[PLREvent] = []
+    bus = EventBus()
+    bus.subscribe(seen.append)
+    events = _FakeEvents([event("tip_pickup")])
+    driver = IPrep2Driver(io=_FakeHTTP(), events_io=events)
+    with use_event_bus(bus):
+      with event_context(operation="protocol.setup_phase", step=1):
+        await driver.setup()
+      await events.drained.wait()
+      await driver.stop()
+    (tip_pickup,) = [e for e in seen if e.name == "iprep2.tip_pickup"]
+    self.assertEqual(tip_pickup.context, {})
 
   async def test_an_event_reaches_the_bus_under_the_instruments_name(self) -> None:
     names = await self._seen([event("motor_move_started"), event("motor_move_completed")])
@@ -405,24 +483,52 @@ class EventTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(await self._seen([event("something_new")]), ["iprep2.something_new"])
 
 
-class CredentialTests(unittest.IsolatedAsyncioTestCase):
-  """What the driver refuses to do with a key.
+class TransportAddressTests(unittest.TestCase):
+  """Where the event stream goes when the HTTP transport was handed over ready-built."""
 
-  Asynchronous although nothing here awaits: building a driver builds a `pylabrobot.io.HTTP`,
-  which constructs an asyncio primitive in its own constructor, and on Python 3.9 that needs a
-  loop to exist. Running these inside one keeps the test about credentials rather than about that.
-  """
+  def _io(self, base_url: str, key: Optional[str] = None) -> HTTP:
+    """A transport to the instrument at the given address.
 
-  async def test_a_key_without_tls_is_refused(self) -> None:
+    Args:
+      base_url: where its API is served.
+      key: a bearer token to send, if any.
+
+    Returns:
+      The transport.
+    """
+    return HTTP(
+      human_readable_device_name="sim",
+      base_url=base_url,
+      headers={} if key is None else {"Authorization": f"Bearer {key}"},
+    )
+
+  def test_the_event_stream_follows_the_transport_it_was_handed(self) -> None:
+    """Not `localhost`: both connections reach the instrument the requests go to, with the same
+    headers, and `host` and `port` name that instrument."""
+    driver = IPrep2Driver(io=self._io("https://sim.example.com/api/v1", key="secret-token"))
+    self.assertEqual(driver.events_io._url, "wss://sim.example.com/api/v1/ws/events")
+    self.assertEqual(driver.events_io._headers, {"Authorization": "Bearer secret-token"})
+    self.assertEqual((driver.host, driver.port, driver.secure), ("sim.example.com", 443, True))
+
+  def test_the_event_stream_is_served_under_the_same_root(self) -> None:
+    driver = IPrep2Driver(io=self._io("http://10.0.0.5:8080/sims/7/api/v1"))
+    self.assertEqual(driver.events_io._url, "ws://10.0.0.5:8080/sims/7/api/v1/ws/events")
+    self.assertEqual((driver.host, driver.port, driver.secure), ("10.0.0.5", 8080, False))
+
+
+class CredentialTests(unittest.TestCase):
+  """What the driver refuses to do with a key."""
+
+  def test_a_key_without_tls_is_refused(self) -> None:
     """It would go on the wire in clear text, which is what a key is meant to avoid."""
     with self.assertRaises(ValueError) as caught:
       IPrep2Driver(host="iprep2.local", api_key="secret-token")
     self.assertIn("clear text", str(caught.exception))
     self.assertNotIn("secret-token", str(caught.exception))
 
-  async def test_a_key_over_tls_is_allowed(self) -> None:
+  def test_a_key_over_tls_is_allowed(self) -> None:
     IPrep2Driver(host="iprep2.example.com", api_key="secret-token", secure=True)
 
-  async def test_no_key_needs_no_tls(self) -> None:
+  def test_no_key_needs_no_tls(self) -> None:
     """An instrument on a bench is unauthenticated, which is the common case."""
     IPrep2Driver(host="iprep2.local")

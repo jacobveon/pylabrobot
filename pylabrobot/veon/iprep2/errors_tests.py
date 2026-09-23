@@ -1,6 +1,8 @@
 """Turning what the instrument reported into something a caller can catch."""
 
+import copy
 import logging
+import pickle
 import unittest
 from typing import List
 
@@ -178,6 +180,59 @@ class ErrorFromEnvelopeTests(unittest.TestCase):
 
   def test_a_code_that_names_no_channel_has_none(self) -> None:
     self.assertIsNone(error_from_envelope(400, envelope(error_code="DECK.NOT_CONFIGURED")).channel)
+
+  def test_a_json_true_is_not_a_channel(self) -> None:
+    """`bool` is an `int` to Python, so `true` would otherwise read as channel 1."""
+    self.assertIsNone(error_from_envelope(422, envelope(error_code="X.Y", channel=True)).channel)
+
+  def test_per_channel_outcomes_are_keyed_by_number(self) -> None:
+    """JSON carries the keys as strings; a lookup by the instrument's channel number finds them."""
+    raised = error_from_envelope(
+      422,
+      envelope(
+        error_code="TIP.PICKUP_RETENTION_FAILED",
+        channels={"1": {"outcome": "ok"}, "3": {"outcome": "failed"}},
+      ),
+    )
+    self.assertEqual(raised.channels, {1: {"outcome": "ok"}, 3: {"outcome": "failed"}})
+    self.assertEqual(raised.channels[3]["outcome"], "failed")
+    self.assertEqual(raised.payload["channels"]["3"], {"outcome": "failed"})
+
+  def test_a_code_that_reports_no_channels_has_none(self) -> None:
+    channels: object
+    for channels in (None, "not-a-mapping", {"first": {}}):
+      with self.subTest(channels=channels):
+        raised = error_from_envelope(422, envelope(error_code="X.Y", channels=channels))
+        self.assertEqual(raised.channels, {})
+
+  def test_codes_without_a_dot_that_the_instrument_sends_pick_their_class(self) -> None:
+    """They have no family to be found by. `VALIDATION_ERROR` is a validation failure, and the
+    generic code for a 503 is an instrument not yet able to take a request - not a busy one."""
+    validation = error_from_envelope(400, envelope(error_code="VALIDATION_ERROR"))
+    self.assertIsInstance(validation, IPrep2ValidationError)
+    unavailable = error_from_envelope(503, envelope(error_code="SERVICE_UNAVAILABLE"))
+    self.assertIsInstance(unavailable, IPrep2InstrumentError)
+    self.assertNotIsInstance(unavailable, IPrep2BusyError)
+
+  def test_an_error_survives_pickling_and_copying(self) -> None:
+    """Crossing a process boundary, or a harness that copies what it caught, must hand back the
+    instrument's error rather than a `TypeError` in its place."""
+    raised = error_from_envelope(
+      409,
+      envelope(error_code="INSTRUMENT.BUSY", domain="instrument", message="held", owner="script"),
+    )
+    for rebuilt in (
+      pickle.loads(pickle.dumps(raised)),
+      copy.copy(raised),
+      copy.deepcopy(raised),
+    ):
+      with self.subTest(rebuilt=rebuilt):
+        self.assertIsInstance(rebuilt, IPrep2BusyError)
+        self.assertEqual(str(rebuilt), str(raised))
+        self.assertEqual(
+          (rebuilt.error_code, rebuilt.domain, rebuilt.http_status, rebuilt.payload),
+          (raised.error_code, raised.domain, raised.http_status, raised.payload),
+        )
 
   def test_every_exception_is_catchable_as_the_base(self) -> None:
     """One `except IPrep2Error` catches whatever the instrument reports."""

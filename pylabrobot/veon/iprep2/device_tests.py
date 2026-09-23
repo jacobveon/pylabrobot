@@ -134,6 +134,32 @@ class DeviceTests(_DeviceTestCase):
     self.assertIs(deck.parent, device)
     self.assertEqual([child.name for child in device.children], ["deck"])
 
+  async def test_a_device_whose_deck_has_another_name_round_trips(self) -> None:
+    """The loaded deck replaces the default whatever it is called. Beside it, it would hold the
+    labware while `device.deck` - which setup calibrates and checks - held none."""
+    for deck in (IPrep2Deck(name="bench"), IPrep2Deck().named("bench")):
+      with self.subTest(deck=deck.name):
+        device = IPrep2Device(deck=deck, host="iprep2.local")
+        device.deck.assign_child_at_zone(labware("source"), "Zone1")
+        for loaded in (IPrep2Device.deserialize(device.serialize()), device.copy()):
+          self.assertEqual([child.name for child in loaded.children], ["bench"])
+          self.assertIs(loaded.deck, loaded.children[0])
+          held = loaded.deck.zones["Zone1"]
+          assert held is not None
+          self.assertEqual(held.name, "source")
+
+  async def test_a_second_deck_is_refused_without_reassign(self) -> None:
+    device = IPrep2Device(host="iprep2.local")
+    deck = device.deck
+    with self.assertRaises(ValueError):
+      device.assign_child_resource(IPrep2Deck(name="other"), reassign=False)
+    self.assertIs(device.deck, deck)
+    self.assertEqual([child.name for child in device.children], ["deck"])
+
+  async def test_the_request_timeout_round_trips(self) -> None:
+    loaded = IPrep2Device.deserialize(IPrep2Device(host="iprep2.local", timeout=5.0).serialize())
+    self.assertEqual(loaded.driver.io.timeout, 5.0)
+
   async def test_a_device_can_be_copied(self) -> None:
     device = IPrep2Device(host="iprep2.local")
     device.deck.assign_child_at_zone(labware(), "Zone1")
