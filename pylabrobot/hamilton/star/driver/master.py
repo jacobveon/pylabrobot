@@ -21,7 +21,6 @@ from pylabrobot.hamilton.protocol.text.router import ReplyRouter
 from pylabrobot.hamilton.star.driver.configuration import (
   DeviceConfiguration,
   read_configuration,
-  to_jsonable,
 )
 from pylabrobot.hamilton.star.driver.errors import (
   STAR_MODULE_ID_LENGTH,
@@ -53,6 +52,7 @@ from pylabrobot.resources.hamilton.tip_creators import HamiltonTip, TipPickupMet
 from pylabrobot.resources.manipulator import LinkBody
 from pylabrobot.resources.n_channel_pipettes import NChannelPipette
 from pylabrobot.resources.resource import Resource
+from pylabrobot.serializer import serialize
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +162,7 @@ class STARDriver:
     self.firmware: Dict[str, str] = {}
     # Which table index each tip type was written to. The table is volatile, so this is
     # rebuilt per session as tips are first used.
-    self._tip_type_indices: Dict[int, int] = {}
+    self._tip_type_indices: Dict[str, int] = {}
 
     # Subsystems. Each reads what it needs off `configuration`, so they are usable once setup has
     # run and raise a clear error before that. Each arm appears only if setup finds one installed.
@@ -1044,17 +1044,19 @@ class STARDriver:
       Its index in the device's tip type table.
 
     Raises:
-      ValueError: If the table is full.
+      ValueError: If the tip model is undefined or the table is full.
     """
-    tip_hash = hash(tip)
-    if tip_hash not in self._tip_type_indices:
+    model = tip.model
+    if model is None:
+      raise ValueError("Tip model must be defined to assign a tip type index.")
+    if model not in self._tip_type_indices:
       index = len(self._tip_type_indices) + 1
       if index > 99:
         raise ValueError("the tip type table is full: 99 tip types have already been defined.")
       await self.define_tip_needle(
         tip_type_table_index=index,
         has_filter=tip.has_filter,
-        tip_length=tip.total_tip_length - tip.fitting_depth,
+        tip_length=tip.get_size_z() - tip.fitting_depth,
         # Floored at 1.0 uL so a teaching or probe needle with no capacity registers the way the
         # firmware's own non-pipetting tools do. It does not affect pickup, which goes by length
         # and collar.
@@ -1062,8 +1064,8 @@ class STARDriver:
         tip_size=tip.tip_size,
         pickup_method=tip.pickup_method,
       )
-      self._tip_type_indices[tip_hash] = index
-    return self._tip_type_indices[tip_hash]
+      self._tip_type_indices[model] = index
+    return self._tip_type_indices[model]
 
   # ----------------------------------------
   # Discovery and initialization
@@ -1497,10 +1499,13 @@ class STARDriver:
     if self.configuration is None:
       raise RuntimeError("nothing has been read off this device; call `setup` first")
 
-    saved: Dict[str, Any] = {"device": to_jsonable(self.configuration), "arms": {}}
+    saved: Dict[str, Any] = {
+      "device": serialize(dataclasses.asdict(self.configuration)),
+      "arms": {},
+    }
     for arm in self.arms:
       carried = {
-        name: to_jsonable(feature.configuration)
+        name: serialize(dataclasses.asdict(feature.configuration))
         for name, feature in (
           ("pipettes", arm.pipettes),
           ("head96", arm.head96),
@@ -1512,7 +1517,7 @@ class STARDriver:
       if carried:
         saved["arms"][arm.side] = carried
     if self.autoload is not None:
-      saved["autoload"] = to_jsonable(self.autoload.configuration)
+      saved["autoload"] = serialize(dataclasses.asdict(self.autoload.configuration))
     return saved
 
   def save_configuration(self, path: str, indent: Optional[int] = 2) -> None:
