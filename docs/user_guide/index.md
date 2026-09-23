@@ -51,6 +51,7 @@ revvity/index
 sartorius/index
 thermo_fisher/index
 ufactory/index
+veon/index
 ```
 
 ```{toctree}

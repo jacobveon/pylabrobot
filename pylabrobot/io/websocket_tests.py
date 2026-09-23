@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import tempfile
 import unittest
 from pathlib import Path
@@ -103,6 +104,28 @@ class WebSocketTests(unittest.IsolatedAsyncioTestCase):
     with self.assertRaises(TimeoutError):
       await io.read(timeout=0.01)
     self.assertFalse(connection.closed)
+
+  async def test_a_read_timeout_is_not_logged_as_an_error(self) -> None:
+    """Whether a quiet spell is a fault is the caller's to judge - a follower on an event stream
+    expects one every minute - so the transport raises and says nothing above debug."""
+    connection = _FakeConnection()
+    io = await self._connected(connection)
+    await connection.drained.wait()
+
+    records: List[logging.LogRecord] = []
+
+    class _Catcher(logging.Handler):
+      def emit(self, record: logging.LogRecord) -> None:
+        records.append(record)
+
+    handler = _Catcher(level=logging.WARNING)
+    logging.getLogger("pylabrobot.io.websocket").addHandler(handler)
+    try:
+      with self.assertRaises(TimeoutError):
+        await io.read(timeout=0.01)
+    finally:
+      logging.getLogger("pylabrobot.io.websocket").removeHandler(handler)
+    self.assertEqual([r.getMessage() for r in records], [])
 
   async def test_ended_stream_raises_instead_of_waiting(self) -> None:
     """A read past the end of a closed stream raises rather than waiting for a message that

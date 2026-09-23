@@ -442,7 +442,9 @@ class WebSocket(IOBase):
     try:
       message = await asyncio.wait_for(queue.get(), timeout=timeout)
     except asyncio.TimeoutError as exc:
-      logger.error("read timeout: %r", exc)
+      # Not logged above debug: whether a quiet spell is a fault is the caller's to judge - a
+      # follower on an event stream expects them - and the exception already says what happened.
+      logger.debug("no message from %s in %s s", self._safe_url, timeout)
       raise TimeoutError(f"Timeout while reading from websocket after {timeout} seconds") from exc
 
     if isinstance(message, _Closed):
